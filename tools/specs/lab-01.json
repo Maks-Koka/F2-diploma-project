@@ -1,0 +1,5 @@
+{
+  "output": "labs/lab-01/Лабораторна_1_Кока_МС.docx",
+  "title": {"kind": "report", "lab": 1, "topic": "Ініціалізація кваліфікаційного проєкту: Setup інженерного PKM-середовища та верифікація Thesis Proposal"},
+  "sources": ["labs/lab-01/report.md"]
+}
