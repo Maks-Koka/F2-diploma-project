@@ -171,6 +171,42 @@ def add_table(doc: Document, rows: list[list[str]]) -> None:
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     set_cell_border(table)
     size = Pt(11) if ncols >= 5 else Pt(12)
+    # Ширина колонок пропорційна середній довжині тексту (мінімум 1,8 см), загальна — 16,5 см.
+    import statistics
+    weights = []
+    for j in range(ncols):
+        lens = [len(r[j]) if j < len(r) else 0 for r in rows]
+        weights.append(max(6.0, min(statistics.mean(lens) * 0.6 + max(lens) * 0.4, 120.0)))
+    total = sum(weights)
+    char_cm = 0.24 if ncols >= 5 else 0.27
+    mins = []
+    for j in range(ncols):
+        words = [w for r in rows if j < len(r) for w in re.split(r"[\s<>]+", r[j].replace("`", ""))]
+        longest = max((len(w) for w in words), default=4)
+        mins.append(max(1.6, min(longest, 18) * char_cm + 0.5))
+    # Ітеративно: колонки, що впираються в мінімум, фіксуються; решта ділить залишок пропорційно вагам.
+    fixed: dict[int, float] = {}
+    for _ in range(ncols):
+        free = [j for j in range(ncols) if j not in fixed]
+        rest = 16.5 - sum(fixed.values())
+        wsum = sum(weights[j] for j in free) or 1.0
+        changed = False
+        for j in free:
+            if rest * weights[j] / wsum < mins[j]:
+                fixed[j] = mins[j]
+                changed = True
+        if not changed:
+            break
+    free = [j for j in range(ncols) if j not in fixed]
+    rest = max(16.5 - sum(fixed.values()), 0.5 * len(free))
+    wsum = sum(weights[j] for j in free) or 1.0
+    widths = [fixed.get(j, rest * weights[j] / wsum) for j in range(ncols)]
+    table.autofit = False
+    for j, gc in enumerate(table._tbl.tblGrid.gridCol_lst):
+        gc.w = Cm(widths[j])
+    for j, w in enumerate(widths):
+        for cell in table.columns[j].cells:
+            cell.width = Cm(w)
     for i, row in enumerate(rows):
         for j in range(ncols):
             cell = table.cell(i, j)
@@ -431,6 +467,7 @@ def main() -> None:
     for k, src in enumerate(spec["sources"]):
         path = (ROOT / src).resolve()
         md = expand_includes(path.read_text(encoding="utf-8"), path.parent)
+        md = re.sub(r'<a id="[^"]*"></a>', "", md)  # HTML-якорі для GitHub не потрібні у .docx
         if k and spec.get("page_break_between", True):
             doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         render_markdown(doc, md, path.parent, figure_counter)

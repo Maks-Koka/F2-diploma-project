@@ -65,13 +65,13 @@ Notion-синхронізацію великих Markdown-файлів вико�
 
 ## ЛР№5 (`feature/chapter2-architecture`)
 
-- [ ] `docs/srs.md` (ISO/IEC/IEEE 29148)
-- [ ] C4 L1, L2 (Mermaid)
-- [ ] C4 L3 (Mermaid)
-- [ ] ADR-001 (Approved)
-- [ ] `2_design.md` з трасуванням, README
-- [ ] `labs/lab-05/` повний комплект + таблиця нумерації, звіт `.docx`
-- [ ] PR у `main`
+- [x] `docs/srs.md` (ISO/IEC/IEEE 29148)
+- [x] C4 L1, L2 (Mermaid)
+- [x] C4 L3 (Mermaid)
+- [x] ADR-001 (Approved)
+- [x] `2_design.md` з трасуванням, README
+- [x] `labs/lab-05/` повний комплект + таблиця нумерації, звіт `.docx`
+- [x] PR у `main`
 
 ## ЛР№6 (`feature/chapter2-architecture-data-api-logic`)
 
