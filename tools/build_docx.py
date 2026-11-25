@@ -55,10 +55,13 @@ def render_mermaid(code: str) -> Path:
         src.write_text(code, encoding="utf-8")
         cfg = CACHE / "config.json"
         cfg.write_text(json.dumps({"theme": "default", "themeVariables": {"fontFamily": "Arial"}}), encoding="utf-8")
-        subprocess.run(
-            [mmdc_cmd(), "-i", str(src), "-o", str(out), "-s", "2", "-b", "white", "-c", str(cfg), "-w", "1400"],
-            check=True, capture_output=True,
+        proc = subprocess.run(
+            [mmdc_cmd(), "-i", str(src), "-o", str(out), "-s", "2", "-b", "white", "-c", str(cfg)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
+        # На Windows mmdc повертає ненульовий код через повідомлення taskkill; критерій — наявність PNG.
+        if not out.exists():
+            raise RuntimeError(f"Mermaid render failed for {src}:\n{proc.stdout}\n{proc.stderr}")
     return out
 
 
