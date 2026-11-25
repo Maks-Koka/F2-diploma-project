@@ -55,13 +55,13 @@ Notion-синхронізацію великих Markdown-файлів вико�
 
 ## ЛР№4 (`feature/chapter1-final`)
 
-- [ ] Аналіз предметної області As-Is (Notion)
-- [ ] To-Be, Core Features 6–8, NFR, постановка задачі
-- [ ] `F2_Diploma_Chapter1_Кока.docx` ≥ 5 с.
-- [ ] README (NFR Matrix + посилання), `1_analysis.md`
-- [ ] Статус етапу в календарному плані
-- [ ] `labs/lab-04/` повний комплект, звіт `.docx`
-- [ ] PR у `main` (3–4 пункти обмежень)
+- [x] Аналіз предметної області As-Is (Notion)
+- [x] To-Be, Core Features 6–8, NFR, постановка задачі
+- [x] `F2_Diploma_Chapter1_Кока.docx` ≥ 5 с.
+- [x] README (NFR Matrix + посилання), `1_analysis.md`
+- [x] Статус етапу в календарному плані
+- [x] `labs/lab-04/` повний комплект, звіт `.docx`
+- [x] PR у `main` (3–4 пункти обмежень)
 
 ## ЛР№5 (`feature/chapter2-architecture`)
 

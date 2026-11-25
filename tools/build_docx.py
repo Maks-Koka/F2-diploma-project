@@ -392,7 +392,8 @@ def title_page(doc: Document, spec: dict) -> None:
 
     centered("Міністерство освіти і науки України")
     centered(UNIVERSITY)
-    for _ in range(6):
+    gap = 6 if t["kind"] == "report" else 4
+    for _ in range(gap):
         doc.add_paragraph()
     if t["kind"] == "report":
         centered("ЗВІТ", bold=True, size=16)
@@ -404,7 +405,7 @@ def title_page(doc: Document, spec: dict) -> None:
         centered("кваліфікаційної роботи бакалавра")
         centered("на тему: «Інтелектуальна платформа виявлення та оцінювання ринкових можливостей»")
         centered("(DemandLens)")
-    for _ in range(5):
+    for _ in range(gap - 1):
         doc.add_paragraph()
     for line in (
         "Виконав: студент 4 курсу",
@@ -415,7 +416,7 @@ def title_page(doc: Document, spec: dict) -> None:
         p = doc.add_paragraph()
         p.paragraph_format.left_indent = Cm(9)
         p.add_run(line)
-    for _ in range(4):
+    for _ in range(gap - 2):
         doc.add_paragraph()
     centered(f"Чернівці — {t.get('year', 2026)}")
     doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
