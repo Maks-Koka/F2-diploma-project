@@ -1,0 +1,5 @@
+{
+  "output": "labs/lab-03/Лабораторна_3_Кока_МС.docx",
+  "title": {"kind": "report", "lab": 3, "topic": "Технічне письмо: інженерний конкурентний аналіз (Competitive Analysis) та ШІ-рефакторинг тексту"},
+  "sources": ["labs/lab-03/report.md"]
+}
