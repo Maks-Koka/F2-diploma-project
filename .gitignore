@@ -1,0 +1,10 @@
+﻿# Вхідні методички (авторські матеріали викладача, не публікуються)
+labs-input/
+# Тимчасові файли
+~$*.docx
+*.tmp
+.vale/styles/*/
+!.vale/styles/DemandLens/
+node_modules/
+__pycache__/
+build/
