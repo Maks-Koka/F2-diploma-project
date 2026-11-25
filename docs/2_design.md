@@ -212,10 +212,754 @@ C4Component
 
 ## 2.5. Специфікація міжсервісних контрактів та топологія API-маршрутів
 
+### 2.5.1. Контракт REST API (OpenAPI 3.0)
+
+Детальну специфікацію ендпоінтів у форматі OpenAPI 3.0.3 зафіксовано у файлі
+[openapi.yaml](api/openapi.yaml). Контракт описує інтерфейс між контейнерами Web App / API Gateway і
+Core API (C4 Level 2) і є джерелом для генерації серверних стабів DRF і клієнтського SDK TypeScript.
+Валідацію виконано Redocly CLI (правила `recommended`): 0 помилок, 0 попереджень.
+
+| Аспект | Рішення в контракті | Вимоги |
+|---|---|---|
+| Ресурси | 17 операцій; шляхи — іменники у множині (`/projects`, `/collection-runs`, `/niches`, `/competitors`, `/reports`, `/data-sources`, `/audit-events`); ідентифікатор `x-route-id` = `API-REQ-NN` | [SRS-FUN-01](srs.md#srs-fun-01)–[SRS-FUN-25](srs.md#srs-fun-25) |
+| Методи і коди | `POST` створення — 201; тривалі операції — 202 Accepted з `Location`; повтор з тим самим `Idempotency-Key` — 200; `PATCH` з `If-Match` для оптимістичного блокування | [SRS-FUN-06](srs.md#srs-fun-06), [SRS-NFR-PERF-03](srs.md#srs-nfr-perf-03) |
+| Безпека | `securitySchemes.bearerAuth` (HTTP Bearer, JWT); глобальна вимога для всіх операцій, крім `/auth/tokens*` | [SRS-NFR-SEC-01](srs.md#srs-nfr-sec-01), [SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03) |
+| Валідація | `minLength`, `maxLength`, `minimum`, `maximum`, `multipleOf`, `pattern`, `uniqueItems`, `additionalProperties: false` для тіл запитів (захист від Mass Assignment) | [SRS-FUN-04](srs.md#srs-fun-04) |
+| Помилки | Спільна схема `Error` (`code`, `message`, `details[]`, `trace_id`); відповіді 400, 401, 403, 404, 409, 422, 429 (`Retry-After`), 500, 503 | [SRS-NFR-SEC-04](srs.md#srs-nfr-sec-04), [SRS-NFR-OBS-01](srs.md#srs-nfr-obs-01) |
+| Пагінація | `page` (1–10 000), `page_size` (1–100, за замовчуванням 20); відповідь містить `total` | [SRS-FUN-05](srs.md#srs-fun-05), [SRS-FUN-20](srs.md#srs-fun-20) |
+| Узгодженість з БД | Поля JSON у snake_case збігаються з колонками моделі 2.7; ENUM-схеми ідентичні типам PostgreSQL | Підрозділ 2.8 |
+
 ## 2.6. Моделювання користувацького досвіду та транзакційних сценаріїв (Use Cases)
 
 ## 2.7. Проєктування та документування моделей даних
 
+### 2.7.1. Логіко-фізична модель (ERD)
+
+СУБД — PostgreSQL 17 з розширеннями `pgvector` 0.8 і `citext`. Модель приведено до третьої нормальної
+форми: похідні значення (внесок критерію, підсумкові лічильники проєкту) не зберігаються, а
+обчислюються в представленнях. Первинні ключі — `uuid` (UUIDv7, генерується застосунком, що зберігає
+локальність вставок у B-Tree), крім журналу аудиту (`bigint identity`). Усі часові поля — `timestamptz`
+(UTC). Модель подано трьома діаграмами за піддоменами; спільні сутності (`users`, `research_projects`)
+повторюються як точки зв'язку.
+
+Позначення кратності (Crow's Foot): `||--o{` — один до нуля або багатьох; `||--|{` — один до одного
+або багатьох; `||--o|` — один до нуля або одного.
+
+```mermaid
+erDiagram
+    users ||--o{ refresh_tokens : "issues"
+    users ||--o{ research_projects : "owns"
+    users ||--o{ audit_events : "performs"
+    research_projects ||--|{ project_keywords : "has"
+    research_projects ||--|{ project_sources : "uses"
+    data_sources ||--o{ project_sources : "selected in"
+    refresh_tokens ||--o| refresh_tokens : "replaced by"
+    users {
+        uuid id PK
+        citext email UK "NOT NULL"
+        varchar(255) password_hash "Argon2id"
+        user_role role "ENUM, NOT NULL"
+        boolean is_active "DEFAULT true"
+        smallint failed_login_count "DEFAULT 0"
+        timestamptz last_login_at
+        timestamptz created_at "NOT NULL"
+        timestamptz updated_at "NOT NULL"
+        timestamptz deleted_at "soft delete"
+        integer version "optimistic lock"
+    }
+    refresh_tokens {
+        uuid id PK "jti"
+        uuid user_id FK
+        char(64) token_hash UK "SHA-256"
+        timestamptz expires_at "NOT NULL"
+        timestamptz revoked_at
+        uuid replaced_by_id FK
+        timestamptz created_at
+    }
+    data_sources {
+        uuid id PK
+        source_code code UK "ENUM"
+        varchar(100) name
+        text base_url
+        text tos_url
+        varchar(100) license
+        integer rate_limit_per_hour "CHECK > 0"
+        numeric(3,2) quota_share "DEFAULT 0.80"
+        boolean is_enabled
+        timestamptz created_at
+        timestamptz updated_at
+        integer version
+    }
+    research_projects {
+        uuid id PK
+        uuid owner_id FK
+        varchar(200) title "CHECK length 3..200"
+        text description "CHECK length <= 2000"
+        project_status status "ENUM"
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+        integer version
+    }
+    project_keywords {
+        uuid id PK
+        uuid project_id FK
+        varchar(100) keyword "UK project_id, lower(keyword)"
+        timestamptz created_at
+    }
+    project_sources {
+        uuid project_id PK, FK
+        uuid source_id PK, FK
+        timestamptz created_at
+    }
+    audit_events {
+        bigint id PK "GENERATED ALWAYS AS IDENTITY"
+        uuid actor_id FK "nullable"
+        varchar(64) action
+        varchar(64) entity_type
+        uuid entity_id
+        jsonb payload
+        inet ip
+        char(32) trace_id
+        timestamptz created_at "partition key"
+    }
+```
+
+```mermaid
+erDiagram
+    research_projects ||--o{ collection_runs : "has"
+    users ||--o{ collection_runs : "requests"
+    collection_runs ||--|{ collection_run_sources : "splits into"
+    data_sources ||--o{ collection_run_sources : "collected from"
+    data_sources ||--o{ documents : "provides"
+    research_projects ||--o{ project_documents : "links"
+    documents ||--o{ project_documents : "linked to"
+    collection_runs ||--o{ project_documents : "first found by"
+    documents ||--o| documents : "duplicate of"
+    collection_runs {
+        uuid id PK
+        uuid project_id FK
+        uuid requested_by FK
+        varchar(64) idempotency_key "UK project_id, key"
+        char(64) request_hash "SHA-256 тіла запиту"
+        run_status status "ENUM"
+        integer documents_fetched "DEFAULT 0"
+        integer attempt_count "CHECK >= 0"
+        varchar(64) error_code
+        text error_message
+        timestamptz started_at
+        timestamptz finished_at
+        timestamptz created_at
+        timestamptz updated_at
+        integer version
+    }
+    collection_run_sources {
+        uuid run_id PK, FK
+        uuid source_id PK, FK
+        run_status status "ENUM"
+        jsonb cursor "останній курсор"
+        integer pages_fetched
+        integer documents_fetched
+        integer attempt_count "CHECK >= 0"
+        varchar(64) last_error_code
+        timestamptz next_retry_at
+        timestamptz updated_at
+    }
+    documents {
+        uuid id PK
+        uuid source_id FK
+        varchar(255) external_id "UK source_id, external_id"
+        text url
+        text title
+        text body
+        char(64) author_hash "HMAC-SHA-256"
+        char(64) content_hash UK "SHA-256"
+        vector(384) embedding "HNSW"
+        char(2) language "ISO 639-1"
+        jsonb raw
+        uuid duplicate_of_id FK "nullable"
+        timestamptz published_at
+        timestamptz collected_at
+        timestamptz deleted_at
+    }
+    project_documents {
+        uuid project_id PK, FK
+        uuid document_id PK, FK
+        uuid first_run_id FK
+        timestamptz created_at
+    }
+```
+
+```mermaid
+erDiagram
+    research_projects ||--o{ complaints : "has"
+    documents ||--o{ complaints : "contains"
+    research_projects ||--o{ clustering_runs : "has"
+    clustering_runs ||--o{ need_clusters : "produces"
+    need_clusters ||--|{ cluster_terms : "described by"
+    clustering_runs ||--o{ cluster_memberships : "assigns"
+    complaints ||--o{ cluster_memberships : "assigned in"
+    need_clusters ||--o{ cluster_memberships : "contains"
+    need_clusters ||--o| niches : "becomes"
+    research_projects ||--o{ niches : "has"
+    niches ||--o{ competitors : "has"
+    competitors ||--o{ competitor_metrics : "measured by"
+    scoring_models ||--|{ scoring_model_weights : "defines"
+    scoring_models ||--o{ scoring_runs : "applied in"
+    clustering_runs ||--o{ scoring_runs : "input of"
+    research_projects ||--o{ scoring_runs : "has"
+    scoring_runs ||--o{ niche_scores : "produces"
+    niches ||--o{ niche_scores : "scored in"
+    niche_scores ||--|{ score_components : "consists of"
+    niche_scores ||--o{ score_evidence : "supported by"
+    complaints ||--o{ score_evidence : "cited as"
+    niche_scores ||--o{ niche_arguments : "argued by"
+    scoring_runs ||--o{ reports : "exported as"
+    complaints {
+        uuid id PK
+        uuid project_id FK
+        uuid document_id FK
+        smallint sentence_index "UK project, document, index"
+        text text
+        numeric(4,3) pain_score "CHECK 0..1"
+        detection_method detection_method "ENUM"
+        timestamptz created_at
+        timestamptz deleted_at
+    }
+    clustering_runs {
+        uuid id PK
+        uuid project_id FK
+        run_status status "ENUM"
+        varchar(50) algorithm "HDBSCAN"
+        jsonb params
+        integer complaints_count
+        integer clusters_count
+        numeric(4,3) noise_ratio
+        numeric(5,4) silhouette "nullable"
+        varchar(64) error_code
+        timestamptz started_at
+        timestamptz finished_at
+        timestamptz created_at
+    }
+    need_clusters {
+        uuid id PK
+        uuid clustering_run_id FK
+        varchar(200) label
+        integer size "CHECK > 0"
+        numeric(5,4) cohesion
+        timestamptz created_at
+    }
+    cluster_terms {
+        uuid cluster_id PK, FK
+        smallint rank PK "1..10"
+        varchar(100) term
+        numeric(6,5) weight
+    }
+    cluster_memberships {
+        uuid clustering_run_id PK, FK
+        uuid complaint_id PK, FK
+        uuid cluster_id FK "NULL = noise"
+        numeric(4,3) probability
+    }
+    niches {
+        uuid id PK
+        uuid project_id FK
+        uuid cluster_id FK, UK
+        varchar(200) name
+        niche_status status "ENUM"
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+        integer version
+    }
+    competitors {
+        uuid id PK
+        uuid niche_id FK
+        varchar(200) name "UK niche_id, lower(name)"
+        text website_url
+        varchar(140) github_repo "owner/name"
+        uuid created_by FK
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+        integer version
+    }
+    competitor_metrics {
+        uuid id PK
+        uuid competitor_id FK
+        competitor_metric metric "ENUM"
+        numeric(14,2) value "CHECK >= 0"
+        timestamptz captured_at
+    }
+    scoring_models {
+        uuid id PK
+        varchar(20) version UK "SemVer"
+        boolean is_active "partial UK WHERE true"
+        smallint bootstrap_iterations "DEFAULT 500"
+        integer random_seed "DEFAULT 42"
+        uuid created_by FK
+        timestamptz created_at
+    }
+    scoring_model_weights {
+        uuid scoring_model_id PK, FK
+        criterion_code criterion PK "ENUM"
+        numeric(4,3) weight "CHECK 0..1"
+    }
+    scoring_runs {
+        uuid id PK
+        uuid project_id FK
+        uuid scoring_model_id FK
+        uuid clustering_run_id FK
+        uuid requested_by FK
+        varchar(64) idempotency_key "UK project_id, key"
+        char(64) request_hash "SHA-256 тіла запиту"
+        run_status status "ENUM"
+        integer niches_scored
+        varchar(64) error_code
+        timestamptz started_at
+        timestamptz finished_at
+        timestamptz created_at
+        timestamptz updated_at
+        integer version
+    }
+    niche_scores {
+        uuid id PK
+        uuid scoring_run_id FK
+        uuid niche_id FK "UK scoring_run_id, niche_id"
+        numeric(5,2) score "CHECK 0..100"
+        numeric(5,2) ci_low
+        numeric(5,2) ci_high "CHECK ci_low <= score <= ci_high"
+        uncertainty_level uncertainty_level "ENUM"
+        integer complaints_count
+        integer rank "CHECK >= 1"
+        timestamptz created_at
+    }
+    score_components {
+        uuid niche_score_id PK, FK
+        criterion_code criterion PK "ENUM"
+        numeric(14,6) raw_value
+        numeric(5,4) normalized_value "CHECK 0..1"
+    }
+    score_evidence {
+        uuid niche_score_id PK, FK
+        uuid complaint_id PK, FK
+        smallint rank "1..10"
+        numeric(4,3) relevance
+    }
+    niche_arguments {
+        uuid id PK
+        uuid niche_score_id FK
+        argument_kind kind "ENUM"
+        criterion_code criterion "nullable"
+        varchar(500) text
+        timestamptz created_at
+    }
+    reports {
+        uuid id PK
+        uuid project_id FK
+        uuid scoring_run_id FK
+        uuid requested_by FK
+        report_format format "ENUM"
+        run_status status "ENUM"
+        text file_path
+        bigint size_bytes
+        char(64) sha256
+        timestamptz created_at
+        timestamptz expires_at
+    }
+```
+
+### 2.7.2. Типи ENUM
+
+| Тип | Значення | Використання |
+|---|---|---|
+| `user_role` | `ANALYST`, `ADMIN` | `users.role`, claim `role` у JWT |
+| `project_status` | `DRAFT`, `ACTIVE`, `ARCHIVED` | `research_projects.status` |
+| `run_status` | `PENDING`, `RUNNING`, `COMPLETED`, `PARTIALLY_COMPLETED`, `FAILED`, `CANCELLED` | `collection_runs`, `collection_run_sources`, `clustering_runs`, `scoring_runs`, `reports` |
+| `source_code` | `HACKER_NEWS`, `STACK_EXCHANGE`, `GITHUB_ISSUES`, `WIKIMEDIA_PAGEVIEWS`, `REDDIT` | `data_sources.code` |
+| `detection_method` | `LEXICON`, `CLASSIFIER` | `complaints.detection_method` |
+| `niche_status` | `CANDIDATE`, `SCORED`, `ARCHIVED` | `niches.status` |
+| `uncertainty_level` | `LOW`, `MEDIUM`, `HIGH` | `niche_scores.uncertainty_level` |
+| `criterion_code` | `DEMAND_VOLUME`, `PAIN_INTENSITY`, `GROWTH_TREND`, `COMPETITION_GAP`, `SOURCE_DIVERSITY` | `scoring_model_weights`, `score_components`, `niche_arguments` |
+| `argument_kind` | `PRO`, `RISK` | `niche_arguments.kind` |
+| `report_format` | `JSON`, `CSV` | `reports.format` |
+| `competitor_metric` | `GITHUB_STARS`, `GITHUB_OPEN_ISSUES`, `GITHUB_RELEASES_12M`, `HN_MENTIONS_90D` | `competitor_metrics.metric` |
+
+Перехід `run_status`: `PENDING → RUNNING → {COMPLETED | PARTIALLY_COMPLETED | FAILED}`; `PENDING →
+CANCELLED`. Зворотні переходи заборонено тригером `trg_run_status_transition`.
+
+### 2.7.3. Специфікація таблиць
+
+Технічні поля, спільні для таблиць з ознакою «Т»: `created_at timestamptz NOT NULL DEFAULT now()`,
+`updated_at timestamptz NOT NULL` (оновлюється тригером), `deleted_at timestamptz NULL` (soft delete),
+`version integer NOT NULL DEFAULT 1` (оптимістичне блокування: `UPDATE … WHERE id = $1 AND version = $2`,
+0 оновлених рядків — конфлікт 409).
+
+| Таблиця | Призначення | Ключові поля і обмеження | Т |
+|---|---|---|---|
+| `users` | Облікові записи | `email citext UNIQUE`; `password_hash` — Argon2id; `role user_role NOT NULL`; `failed_login_count` для блокування після 10 спроб | Так |
+| `refresh_tokens` | Refresh-токени з ротацією | `id` = claim `jti`; `token_hash char(64) UNIQUE` (зберігається лише хеш); `replaced_by_id` — ланцюжок ротації; повторне використання відкликаного токена відкликає весь ланцюжок | Ні |
+| `data_sources` | Довідник джерел | `code source_code UNIQUE`; `rate_limit_per_hour > 0`; `quota_share` ∈ (0; 1] | Так (без `deleted_at`) |
+| `research_projects` | Дослідницькі проєкти | `owner_id → users ON DELETE RESTRICT`; `title` 3–200 символів; `description` ≤ 2 000 символів | Так |
+| `project_keywords` | Ключові слова (1–20 на проєкт) | `UNIQUE (project_id, lower(keyword))`; `keyword` 2–100 символів | Ні |
+| `project_sources` | Обрані джерела (M:N) | `PK (project_id, source_id)` | Ні |
+| `collection_runs` | Запуски збору | `UNIQUE (project_id, idempotency_key)`; `request_hash` — SHA-256 тіла запиту (той самий ключ з іншим тілом — 409); `attempt_count` — кількість виконань задачі; `status run_status` | Так (без `deleted_at`) |
+| `collection_run_sources` | Прогрес по джерелу | `PK (run_id, source_id)`; `cursor jsonb` — останній успішний курсор; `next_retry_at` | Ні |
+| `documents` | Нормалізовані публікації | `UNIQUE (source_id, external_id)`; `content_hash UNIQUE`; `author_hash` — HMAC-SHA-256; `embedding vector(384)`; `duplicate_of_id` — майже-дублікат | Частково (`deleted_at`) |
+| `project_documents` | Зв'язок проєкт–документ (M:N) | `PK (project_id, document_id)`; `first_run_id` — запуск, що знайшов документ | Ні |
+| `complaints` | Скарги | `UNIQUE (project_id, document_id, sentence_index)`; `pain_score numeric(4,3)` ∈ [0; 1] | Частково |
+| `clustering_runs` | Запуски кластеризації | `silhouette` NULL, якщо кластерів < 2; `error_code` для порожніх вибірок | Ні |
+| `need_clusters` | Кластери потреб | `size > 0`; `cohesion` — середня косинусна близькість до центроїда | Ні |
+| `cluster_terms` | Ключові терміни кластера | `PK (cluster_id, rank)`, `rank` 1–10 | Ні |
+| `cluster_memberships` | Належність скарги до кластера в межах запуску | `PK (clustering_run_id, complaint_id)`; `cluster_id NULL` — шум HDBSCAN | Ні |
+| `niches` | Ніші-кандидати | `cluster_id UNIQUE`; `status niche_status` | Так |
+| `competitors` | Конкуренти ніші | `UNIQUE (niche_id, lower(name))`; `github_repo` відповідає `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$` | Так |
+| `competitor_metrics` | Часові ряди метрик | `UNIQUE (competitor_id, metric, captured_at)`; `value >= 0` | Ні |
+| `scoring_models` | Версії моделі оцінювання | `version UNIQUE`; частковий `UNIQUE (is_active) WHERE is_active`; рядки незмінні після створення | Ні |
+| `scoring_model_weights` | Ваги критеріїв | `PK (scoring_model_id, criterion)`; сума ваг = 1 ± 0,001 (перевірка в транзакції створення моделі) | Ні |
+| `scoring_runs` | Запуски оцінювання | `UNIQUE (project_id, idempotency_key)`, `request_hash`; посилання на модель і запуск кластеризації фіксує вхідний знімок | Так (без `deleted_at`) |
+| `niche_scores` | Рейтинг ніші в запуску | `UNIQUE (scoring_run_id, niche_id)`; `CHECK (ci_low <= score AND score <= ci_high)` | Ні |
+| `score_components` | Нормалізовані значення критеріїв | `PK (niche_score_id, criterion)`; внесок = `100 × weight × normalized_value` обчислюється представленням `v_score_contributions` | Ні |
+| `score_evidence` | Документи-докази | `PK (niche_score_id, complaint_id)`; `rank` 1–10 | Ні |
+| `niche_arguments` | Аргументи «за» і ризики | `kind argument_kind`; `text` ≤ 500 символів | Ні |
+| `reports` | Експортовані звіти | `format report_format`; `sha256` файлу; `expires_at` = `created_at` + 7 діб | Ні |
+| `audit_events` | Журнал аудиту (append-only) | Секціонування за місяцями (`PARTITION BY RANGE (created_at)`); `UPDATE`/`DELETE` заборонено правами ролі БД застосунку | Ні |
+
+### 2.7.4. План індексування
+
+| Індекс | Тип | Запит / вимога | Обґрунтування |
+|---|---|---|---|
+| `ux_users_email` на `users(email)` | B-Tree UNIQUE | Вхід, SRS-FUN-01 | Точковий пошук; `citext` усуває дублікати регістру |
+| `ix_projects_owner` на `research_projects(owner_id, created_at DESC) WHERE deleted_at IS NULL` | B-Tree частковий | Список проєктів, SRS-FUN-05 | Пагінація без сортування в пам'яті |
+| `ux_collection_runs_idem` на `(project_id, idempotency_key)` | B-Tree UNIQUE | Ідемпотентність, SRS-FUN-06 | Конкурентні дублікати запитів відхиляються на рівні БД |
+| `ux_documents_source_ext` на `(source_id, external_id)`, `ux_documents_content_hash` | B-Tree UNIQUE | Дедуплікація, SRS-FUN-09 | `INSERT … ON CONFLICT DO NOTHING` |
+| `ix_documents_embedding_hnsw` на `documents USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)` | HNSW (pgvector) | Майже-дублікати, косинусна близькість ≥ 0,95 | Наближений k-NN за логарифмічний час замість повного перебору |
+| `ix_documents_fts` на `documents USING gin (to_tsvector('english', coalesce(title, '') \|\| ' ' \|\| coalesce(body, '')))` | GIN | Повнотекстовий пошук документів-доказів | Інвертований індекс лексем |
+| `ix_complaints_project_pain` на `complaints(project_id, pain_score DESC) WHERE deleted_at IS NULL` | B-Tree частковий | Перелік скарг, SRS-FUN-13 | Фільтр за мінімальним `pain_score` і сортування |
+| `ix_memberships_cluster` на `cluster_memberships(cluster_id)` | B-Tree | Скарги кластера, ALG-03 | Зворотний зв'язок кластер → скарги |
+| `ix_niche_scores_run_rank` на `niche_scores(scoring_run_id, rank)` | B-Tree | Ранжований список, SRS-NFR-PERF-01 | Index-only scan для сторінки списку |
+| `ix_competitor_metrics_latest` на `competitor_metrics(competitor_id, metric, captured_at DESC)` | B-Tree | Останні метрики, SRS-FUN-16 | `DISTINCT ON` без сортування |
+| `ix_audit_actor_time` на `audit_events(actor_id, created_at DESC)`; `brin_audit_created` на `audit_events USING brin (created_at)` | B-Tree, BRIN | Журнал аудиту, SRS-FUN-23 | BRIN — компактний індекс для монотонно зростаючого часу |
+| `ix_audit_payload` на `audit_events USING gin (payload jsonb_path_ops)` | GIN | Пошук подій за атрибутами | Оператор `@>` для JSONB |
+
+Усі зовнішні ключі мають B-Tree-індекси для уникнення повних сканувань при `JOIN` і каскадних
+перевірках цілісності.
+
+### 2.7.5. Алгоритми обробки даних критичних вузлів
+
+Алгоритми оперують сутностями моделі даних 2.7.1 (розміщення підрозділу — DECISIONS.md, D-07).
+Позначення: `:=` — присвоювання; `=` — порівняння; `AND`, `OR`, `NOT` — логічні операції; `X[i]` —
+i-й елемент колекції X; `|X|` — потужність колекції; `NOW()` — поточний час UTC.
+
+#### ALG-01. Ідемпотентний інкрементальний збір даних з backoff і Circuit Breaker
+
+Призначення: виконання задачі `collect(run_id)` в Ingestion Worker ([SRS-FUN-08](srs.md#srs-fun-08),
+[SRS-NFR-REL-03](srs.md#srs-nfr-rel-03), [SRS-NFR-REL-04](srs.md#srs-nfr-rel-04)).
+
+Вхідні дані: `RunId`; `Sources[1..m]` — записи `collection_run_sources` запуску; `Keywords[1..k]`.
+Константи: `MaxRetries := 5`; `BaseDelay := 2` с; `MaxDelay := 300` с; `PageLimit := 200`;
+`HttpTimeout := 10` с; `TimeBudget := 3300` с (soft time limit задачі); `FailThreshold := 5`;
+`OpenPeriod := 60` с.
+
+1. `Run := SELECT collection_runs WHERE id = RunId FOR UPDATE`.
+2. Якщо `Run = NULL`, записати подію `RUN_NOT_FOUND` у лог і завершити (задача без побічних ефектів).
+3. Якщо `Run.status = COMPLETED OR Run.status = CANCELLED`, завершити (повторна доставка задачі
+   не змінює стан — ідемпотентність).
+4. `Run.status := RUNNING`; `Run.started_at := COALESCE(Run.started_at, NOW())`;
+   `Run.attempt_count := Run.attempt_count + 1`; `T0 := NOW()`; COMMIT.
+5. Для `i := 1 … m`:
+   1. `S := Sources[i]`. Якщо `S.status = COMPLETED`, перейти до наступного `i`.
+   2. Якщо `Breaker[S.source].state = OPEN AND NOW() < Breaker[S.source].open_until`, то
+      `S.status := FAILED`; `S.last_error_code := 'SOURCE_CIRCUIT_OPEN'`; перейти до наступного `i`.
+   3. `S.status := RUNNING`; `Page := 0`; `Retry := 0`; `Cursor := S.cursor`.
+   4. Поки `Page < PageLimit AND S.status = RUNNING`:
+      1. `Wait := TokenBucket[S.source].acquire()` (ліміт = `rate_limit_per_hour × quota_share`).
+      2. `Response := HTTP_GET(S.source, Keywords, Cursor, HttpTimeout)`.
+      3. Якщо `Response.code = 200`:
+         `Batch := PARSE(Response)`; якщо `|Batch| = 0`, то `S.status := COMPLETED`;
+         інакше в одній транзакції для `j := 1 … |Batch|`:
+         `D := NORMALIZE(Batch[j])`; `D.author_hash := HMAC_SHA256(Secret, Batch[j].author)`;
+         `D.content_hash := SHA256(D.title ‖ D.body)`;
+         `INSERT documents … ON CONFLICT (content_hash) DO NOTHING`;
+         `INSERT project_documents … ON CONFLICT DO NOTHING`;
+         далі `Cursor := NEXT_CURSOR(Response)`; `S.cursor := Cursor`; `S.pages_fetched := S.pages_fetched + 1`;
+         `S.documents_fetched := S.documents_fetched + |Batch|`; COMMIT;
+         `Breaker[S.source].failures := 0`; `Retry := 0`; `Page := Page + 1`;
+         якщо `Cursor = NULL`, то `S.status := COMPLETED`.
+      4. Інакше якщо `Response.code = 429 OR Response.code ≥ 500 OR Response = TIMEOUT`:
+         `Retry := Retry + 1`; `S.attempt_count := S.attempt_count + 1`;
+         `Breaker[S.source].failures := Breaker[S.source].failures + 1`;
+         якщо `Breaker[S.source].failures ≥ FailThreshold`, то `Breaker[S.source].state := OPEN`;
+         `Breaker[S.source].open_until := NOW() + OpenPeriod`;
+         якщо `Retry > MaxRetries OR Breaker[S.source].state = OPEN`, то `S.status := FAILED`;
+         `S.last_error_code := 'SOURCE_UNAVAILABLE'`;
+         інакше `Delay := MIN(MaxDelay, BaseDelay × 2^(Retry − 1)) × RANDOM(0.8; 1.2)`;
+         якщо `Response.code = 429 AND Response.retry_after ≠ NULL`, то `Delay := MAX(Delay, Response.retry_after)`;
+         якщо `(NOW() − T0) + Delay > TimeBudget`, то `S.next_retry_at := NOW() + Delay`;
+         зберегти стан і перепланувати задачу `collect(RunId)` з затримкою `Delay`; завершити поточне
+         виконання; інакше `SLEEP(Delay)`.
+      5. Інакше (код 4xx, крім 429): `S.status := FAILED`; `S.last_error_code := 'SOURCE_REJECTED'`.
+   5. Якщо `Page = PageLimit AND S.status = RUNNING`, то `S.status := PARTIALLY_COMPLETED`
+      (курсор збережено, наступний запуск продовжить збір).
+6. `Ok := |{S ∈ Sources : S.status = COMPLETED}|`; `Part := |{S : S.status = PARTIALLY_COMPLETED}|`;
+   `Fail := |{S : S.status = FAILED}|`.
+7. Якщо `Fail = 0 AND Part = 0`, то `Run.status := COMPLETED`; інакше якщо `Ok + Part > 0`, то
+   `Run.status := PARTIALLY_COMPLETED`; інакше `Run.status := FAILED`; `Run.error_code := 'ALL_SOURCES_FAILED'`.
+8. `Run.documents_fetched := Σ S.documents_fetched`; `Run.finished_at := NOW()`; COMMIT.
+9. Якщо `Run.documents_fetched > 0`, поставити задачу `detect_and_cluster(project_id)` у чергу
+   `analytics` після COMMIT.
+
+Обробка граничних випадків: порожня видача — статус `COMPLETED` з 0 документів; помилка мережі або
+тайм-аут — повтори з backoff, але не більше 5; ліміт ітерацій — `PageLimit` сторінок на запуск;
+перевищення бюджету часу — перепланування з курсора без втрати даних; відмова одного джерела не
+зупиняє інші (статус `PARTIALLY_COMPLETED`); повторна доставка задачі — no-op для завершених запусків.
+
+```mermaid
+graph TD
+    A(["Початок: collect(RunId)"]) --> B[/"Ввід: RunId, Sources[1..m], Keywords"/]
+    B --> C["Run := SELECT collection_runs FOR UPDATE"]
+    C --> D{"Run = NULL"}
+    D -->|Так| Z1(["Кінець: RUN_NOT_FOUND"])
+    D -->|Ні| E{"Run.status = COMPLETED OR Run.status = CANCELLED"}
+    E -->|Так| Z2(["Кінець: no-op"])
+    E -->|Ні| F["Run.status := RUNNING; Run.attempt_count := Run.attempt_count + 1; T0 := NOW(); i := 1"]
+    F --> G{"i ≤ m"}
+    G -->|Ні| R["Агрегувати статуси Sources[1..m]: Run.status := COMPLETED / PARTIALLY_COMPLETED / FAILED"]
+    G -->|Так| H{"Sources[i].status = COMPLETED OR Breaker[i].state = OPEN"}
+    H -->|Так| N["i := i + 1"]
+    N --> G
+    H -->|Ні| I["Page := 0; Retry := 0; Cursor := Sources[i].cursor"]
+    I --> J{"Page < PageLimit AND Sources[i].status = RUNNING"}
+    J -->|Ні| N
+    J -->|Так| K["TokenBucket.acquire(); Response := HTTP_GET(Cursor, 10 с)"]
+    K --> L{"Response.code = 200"}
+    L -->|Так| M["Транзакція: INSERT documents ON CONFLICT DO NOTHING; Sources[i].cursor := NEXT_CURSOR; Page := Page + 1; Retry := 0"]
+    M --> J
+    L -->|Ні| O{"Response.code = 429 OR Response.code ≥ 500 OR TIMEOUT"}
+    O -->|Ні| P["Sources[i].status := FAILED (SOURCE_REJECTED)"]
+    P --> N
+    O -->|Так| Q["Retry := Retry + 1; Breaker[i].failures := Breaker[i].failures + 1"]
+    Q --> Q1{"Retry > 5 OR Breaker[i].failures ≥ 5"}
+    Q1 -->|Так| Q2["Sources[i].status := FAILED; Breaker[i].state := OPEN"]
+    Q2 --> N
+    Q1 -->|Ні| Q3["Delay := MIN(300, 2 × 2^(Retry − 1)) × RANDOM(0.8; 1.2)"]
+    Q3 --> Q4{"NOW() − T0 + Delay > TimeBudget"}
+    Q4 -->|Так| Q5["Зберегти курсор; перепланувати collect(RunId) через Delay"]
+    Q5 --> Z3(["Кінець: RESCHEDULED"])
+    Q4 -->|Ні| Q6["SLEEP(Delay)"]
+    Q6 --> J
+    R --> S1{"Run.documents_fetched > 0"}
+    S1 -->|Так| S2[/"Вивід: задача detect_and_cluster у черзі analytics"/]
+    S1 -->|Ні| Z4(["Кінець"])
+    S2 --> Z4
+```
+
+#### ALG-02. Кластеризація скарг з обробкою порожніх і малих вибірок
+
+Призначення: задача `cluster(project_id, clustering_run_id)` в Analytics Worker
+([SRS-FUN-12](srs.md#srs-fun-12), [SRS-NFR-PERF-05](srs.md#srs-nfr-perf-05)).
+
+Константи: `MinComplaints := 30`; `MinSamples := 5`; `MaxAttempts := 2`; `MinNicheSize := 10`;
+`Seed := 42`; `SilhouetteSample := 10000`.
+
+1. `Complaints := SELECT complaints WHERE project_id = P AND deleted_at IS NULL ORDER BY id`;
+   `N := |Complaints|`.
+2. Якщо `N = 0`, то `Run.status := COMPLETED`; `Run.clusters_count := 0`;
+   `Run.error_code := 'EMPTY_INPUT'`; завершити.
+3. Якщо `N < MinComplaints`, то `Run.status := COMPLETED`; `Run.clusters_count := 0`;
+   `Run.error_code := 'INSUFFICIENT_DATA'`; завершити (ніші не створюються, а рейтинг попереднього
+   запуску зберігається).
+4. `Tfidf := TFIDF(Complaints[1..N].text; ngram: (1; 2); min_df: 2; max_features: 20000)`.
+   Якщо словник `Tfidf` порожній, то `Run.error_code := 'EMPTY_VOCABULARY'`; `Run.status := COMPLETED`;
+   завершити.
+5. `X := NORMALIZE_L2(TRUNCATED_SVD(Tfidf; n_components: MIN(100; |vocabulary| − 1); random_state: Seed))`.
+6. `MinCluster := MAX(MinSamples, ⌊0.01 × N⌋)`; `Attempt := 1`.
+7. `Labels := HDBSCAN(X; min_cluster_size: MinCluster; min_samples: MinSamples)`;
+   `Probabilities := HDBSCAN.probabilities`; `K := |{Labels[i] : Labels[i] ≠ −1}|`;
+   `NoiseRatio := |{i : Labels[i] = −1}| / N`.
+8. Якщо `K = 0 AND Attempt < MaxAttempts`, то `MinCluster := MAX(MinSamples, ⌊MinCluster / 2⌋)`;
+   `Attempt := Attempt + 1`; перейти до кроку 7.
+9. Якщо `K = 0`, то `Run.status := COMPLETED`; `Run.error_code := 'NO_STABLE_CLUSTERS'`;
+   `Run.noise_ratio := NoiseRatio`; завершити.
+10. Якщо `K ≥ 2`, то `Run.silhouette := SILHOUETTE(X[Labels ≠ −1]; Labels[Labels ≠ −1];
+    sample_size: MIN(SilhouetteSample; N); random_state: Seed)`; інакше `Run.silhouette := NULL`.
+11. Для `j := 1 … K`: `Members := {Complaints[i] : Labels[i] = j}`; `Cluster[j].size := |Members|`;
+    `Terms := TOP_TERMS(Tfidf[Members], 10)`; `Cluster[j].label := JOIN(Terms[1..3], ' / ')`;
+    `INSERT need_clusters, cluster_terms`; для кожного `Complaints[i]` записати
+    `cluster_memberships(clustering_run_id, complaint_id, cluster_id := Cluster[Labels[i]] або NULL,
+    probability := Probabilities[i])`.
+12. Для `j := 1 … K`: якщо `Cluster[j].size ≥ MinNicheSize`, то `UPSERT niches (cluster_id := Cluster[j].id,
+    name := Cluster[j].label, status := CANDIDATE)`.
+13. `Run.clusters_count := K`; `Run.noise_ratio := NoiseRatio`; `Run.status := COMPLETED`; COMMIT.
+14. Виняток БД або нестача пам'яті: ROLLBACK; `Run.status := FAILED`; `Run.error_code := 'CLUSTERING_ERROR'`;
+    Celery повторює задачу не більше 2 разів.
+
+Обробка граничних випадків: порожня вибірка (`EMPTY_INPUT`), мала вибірка (`INSUFFICIENT_DATA`),
+вироджений словник (`EMPTY_VOCABULARY`), відсутність стійких кластерів після двох спроб
+(`NO_STABLE_CLUSTERS`), один кластер — silhouette не обчислюється (метрика невизначена при K < 2);
+детермінованість забезпечують фіксований порядок вибірки і `random_state: Seed`.
+
+```mermaid
+graph TD
+    A(["Початок: cluster(P, RunId)"]) --> B[/"Ввід: Complaints[1..N] проєкту P"/]
+    B --> C{"N = 0"}
+    C -->|Так| Z1(["Кінець: COMPLETED, EMPTY_INPUT"])
+    C -->|Ні| D{"N < 30"}
+    D -->|Так| Z2(["Кінець: COMPLETED, INSUFFICIENT_DATA"])
+    D -->|Ні| E["Tfidf := TFIDF(Complaints[1..N].text)"]
+    E --> F{"|vocabulary| = 0"}
+    F -->|Так| Z3(["Кінець: COMPLETED, EMPTY_VOCABULARY"])
+    F -->|Ні| G["X := NORMALIZE_L2(SVD(Tfidf)); MinCluster := MAX(5, ⌊0.01 × N⌋); Attempt := 1"]
+    G --> H["Labels := HDBSCAN(X, MinCluster); K := кількість кластерів"]
+    H --> I{"K = 0 AND Attempt < 2"}
+    I -->|Так| J["MinCluster := MAX(5, ⌊MinCluster / 2⌋); Attempt := Attempt + 1"]
+    J --> H
+    I -->|Ні| K1{"K = 0"}
+    K1 -->|Так| Z4(["Кінець: COMPLETED, NO_STABLE_CLUSTERS"])
+    K1 -->|Ні| L{"K ≥ 2"}
+    L -->|Так| M["Run.silhouette := SILHOUETTE(X, Labels)"]
+    L -->|Ні| M2["Run.silhouette := NULL"]
+    M --> N1["Для j := 1 … K: INSERT need_clusters, cluster_terms, cluster_memberships"]
+    M2 --> N1
+    N1 --> O["Для j := 1 … K: якщо Cluster[j].size ≥ 10, то UPSERT niches (CANDIDATE)"]
+    O --> P[/"Вивід: Run.status := COMPLETED; clusters_count := K"/]
+    P --> Z5(["Кінець"])
+```
+
+#### ALG-03. Обчислення рейтингу ніші з bootstrap-оцінкою невизначеності
+
+Призначення: задача `score(scoring_run_id)` в Analytics Worker ([SRS-FUN-17](srs.md#srs-fun-17),
+[SRS-FUN-18](srs.md#srs-fun-18), [SRS-NFR-REPRO-01](srs.md#srs-nfr-repro-01),
+[SRS-NFR-EXPL-01](srs.md#srs-nfr-expl-01)).
+
+Вхідні дані: `ScoringRun`; модель `M` (`M.weights[1..5]`, `B := M.bootstrap_iterations = 500`,
+`Seed := M.random_seed = 42`); останній `clustering_run` зі статусом `COMPLETED`.
+Константи: `MinComplaintsCI := 30`; `MinEvidence := 3`; `Window := 180` діб; `TimeLimit := 600` с.
+
+1. Якщо `ScoringRun.status = COMPLETED`, завершити (ідемпотентність). `ScoringRun.status := RUNNING`.
+2. Якщо `|Σ_k M.weights[k] − 1| > 0.001`, то `ScoringRun.status := FAILED`;
+   `ScoringRun.error_code := 'INVALID_MODEL'`; завершити.
+3. `Niche := SELECT niches WHERE cluster_id ∈ clusters(clustering_run) AND status ≠ ARCHIVED`;
+   `n := |Niche|`. Якщо `n = 0`, то `ScoringRun.status := COMPLETED`; `niches_scored := 0`;
+   `error_code := 'NO_NICHES'`; завершити.
+4. Для `j := 1 … n`: `C[j] := скарги кластера Niche[j] за останні Window діб`;
+   `Raw[j][DEMAND_VOLUME] := LN(1 + |C[j]|)`;
+   `Raw[j][PAIN_INTENSITY] := MEDIAN(C[j].pain_score)`;
+   `Raw[j][GROWTH_TREND] := SLOPE(помісячні кількості C[j] за 6 міс.)`, а якщо місяців з даними < 3,
+   то `Raw[j][GROWTH_TREND] := 0` і до ризиків додається «Недостатня історія для оцінки тренду»;
+   `Raw[j][COMPETITION_GAP] := 1 − SATURATION[j]`, де `SATURATION[j] := 0.5 × MIN(1; |Comp[j]| / 10) +
+   0.5 × MIN(1; LN(1 + Σ GITHUB_STARS[Comp[j]]) / LN(1 + 100000))`, а якщо конкурентів немає, то
+   `Raw[j][COMPETITION_GAP] := 1` і до ризиків додається «Конкурентів не зареєстровано»;
+   `Raw[j][SOURCE_DIVERSITY] := ENTROPY(розподіл C[j] за джерелами) / LN(|enabled sources|)`.
+5. Для кожного критерію `k`, крім уже нормованих `PAIN_INTENSITY` і `SOURCE_DIVERSITY`:
+   `Min[k] := MIN_j Raw[j][k]`; `Max[k] := MAX_j Raw[j][k]`; якщо `Max[k] = Min[k]`, то
+   `Norm[j][k] := 0.5` для всіх `j` (захист від ділення на нуль); інакше
+   `Norm[j][k] := (Raw[j][k] − Min[k]) / (Max[k] − Min[k])`; для `GROWTH_TREND` від'ємний нахил
+   `Norm[j][k] := 0`.
+6. `Score[j] := ROUND(100 × Σ_k M.weights[k] × Norm[j][k]; 2)`.
+7. `RNG := RANDOM_STATE(Seed)`. Для `j := 1 … n` і `b := 1 … B`: `Sample := RESAMPLE(C[j], |C[j]|, RNG)`;
+   перерахувати `Raw` для критеріїв, що залежать від скарг; нормалізувати з тими самими `Min[k]`,
+   `Max[k]` і обмеженням `[0; 1]`; `S[j][b] := 100 × Σ_k M.weights[k] × Norm_b[k]`.
+   Якщо час виконання перевищує `TimeLimit`, то `ScoringRun.status := FAILED`;
+   `error_code := 'TIMEOUT'`; ROLLBACK; завершити.
+8. `CI_low[j] := PERCENTILE(S[j][1..B]; 2.5)`; `CI_high[j] := PERCENTILE(S[j][1..B]; 97.5)`;
+   `CI_low[j] := MIN(CI_low[j]; Score[j])`; `CI_high[j] := MAX(CI_high[j]; Score[j])` (перцентильний
+   інтервал асиметричного розподілу може не містити точкову оцінку; обмеження `ci_low ≤ score ≤ ci_high`
+   у БД зберігається); `Width := CI_high[j] − CI_low[j]`.
+   Якщо `|C[j]| < MinComplaintsCI OR Width > 25`, то `Level[j] := HIGH`; інакше якщо `Width > 10`, то
+   `Level[j] := MEDIUM`; інакше `Level[j] := LOW`.
+9. `Rank := сортування за Score[j] за спаданням; за рівності — за |C[j]| за спаданням, далі за Niche[j].id`.
+10. `Relevance[i] := COSINE(X[i], CENTROID(Cluster[j]))`; `Evidence[j] := перші 5 скарг C[j] за
+    (pain_score × Relevance)`; якщо `|Evidence[j]| < MinEvidence`,
+    то `Level[j] := HIGH` і до ризиків додається «Недостатньо документів-доказів».
+11. Аргументи: для кожного `k` якщо `Norm[j][k] ≥ 0.7`, то додати `PRO`; якщо `Norm[j][k] ≤ 0.3`, то
+    додати `RISK`; якщо `Level[j] = HIGH`, то додати `RISK` «Висока невизначеність оцінки».
+12. В одній транзакції: `INSERT niche_scores, score_components, score_evidence, niche_arguments`;
+    `Niche[j].status := SCORED`; `ScoringRun.niches_scored := n`; `ScoringRun.status := COMPLETED`; COMMIT;
+    після COMMIT інвалідувати кеш рейтингу проєкту.
+
+Обробка граничних випадків: відсутність ніш (`NO_NICHES`), некоректна модель (`INVALID_MODEL`),
+однакові значення критерію (`Norm := 0.5`), коротка історія і відсутність конкурентів (ризики),
+мала вибірка (`HIGH`), перевищення часу (`TIMEOUT`, ROLLBACK). Цикли обмежено `n × B` ітераціями.
+
+```mermaid
+graph TD
+    A(["Початок: score(ScoringRunId)"]) --> B[/"Ввід: модель M, Niche[1..n], скарги C[j]"/]
+    B --> C{"ScoringRun.status = COMPLETED"}
+    C -->|Так| Z1(["Кінець: no-op"])
+    C -->|Ні| D{"|Σ M.weights[k] − 1| > 0.001"}
+    D -->|Так| Z2(["Кінець: FAILED, INVALID_MODEL"])
+    D -->|Ні| E{"n = 0"}
+    E -->|Так| Z3(["Кінець: COMPLETED, NO_NICHES"])
+    E -->|Ні| F["Для j := 1 … n: Raw[j][k] := значення 5 критеріїв"]
+    F --> G{"Max[k] = Min[k]"}
+    G -->|Так| H1["Norm[j][k] := 0.5"]
+    G -->|Ні| H2["Norm[j][k] := (Raw[j][k] − Min[k]) / (Max[k] − Min[k])"]
+    H1 --> I["Score[j] := 100 × Σ M.weights[k] × Norm[j][k]"]
+    H2 --> I
+    I --> J["Для b := 1 … 500: S[j][b] := Score(RESAMPLE(C[j], Seed))"]
+    J --> K{"Час > 600 с"}
+    K -->|Так| Z4(["Кінець: FAILED, TIMEOUT, ROLLBACK"])
+    K -->|Ні| L["CI_low[j] := P2.5(S[j]); CI_high[j] := P97.5(S[j]); Width := CI_high[j] − CI_low[j]"]
+    L --> M1{"|C[j]| < 30 OR Width > 25"}
+    M1 -->|Так| N1["Level[j] := HIGH"]
+    M1 -->|Ні| M2{"Width > 10"}
+    M2 -->|Так| N2["Level[j] := MEDIUM"]
+    M2 -->|Ні| N3["Level[j] := LOW"]
+    N1 --> O["Rank; Evidence[j]; PRO при Norm ≥ 0.7; RISK при Norm ≤ 0.3"]
+    N2 --> O
+    N3 --> O
+    O --> P[/"Вивід: INSERT niche_scores, score_components, score_evidence, niche_arguments; COMMIT"/]
+    P --> Z5(["Кінець: COMPLETED"])
+```
+
 ## 2.8. Інтеграційний аудит та висновок про готовність архітектури до реалізації
+
+### 2.8.1. Методика аудиту
+
+Перехресну перевірку трьох артефактів — моделі даних (2.7.1–2.7.4), контракту
+[openapi.yaml](api/openapi.yaml) і алгоритмів ALG-01…03 (2.7.5) — виконано у два етапи:
+
+1. Інструментальна перевірка скриптом `tools/check_consistency.py`: рівність 11 ENUM-типів у реєстрі
+   рішень, ERD і OpenAPI; відповідність 106 полів 14 схем OpenAPI колонкам 27 таблиць ERD (поля,
+   отримані через `JOIN` або обчислення, перелічено явно); належність статусів, які присвоюють
+   алгоритми, до ENUM; існування ідентифікаторів `SRS-FUN-NN` і `API-REQ-NN`. Працездатність скрипта
+   підтверджено мутаційним тестом (підміна значення `run_status` в OpenAPI виявляється).
+2. Експертний перехресний аудит (промпт «Data & Logic Gatekeeper») сценаріїв, які скрипт не охоплює:
+   обмеження CHECK, життєвий цикл ключів ідемпотентності, визначеність змінних алгоритмів.
+
+### 2.8.2. Виявлені розбіжності та їх усунення
+
+| № | Тип конфлікту | Розбіжність | Усунення |
+|---|---|---|---|
+| 1 | Logic-to-Data | ALG-01 збільшує `attempt_count` при кожному виконанні і перепланування задачі, а БД обмежувала `CHECK 0..5`, API — `maximum: 5`: довготривалий збір порушив би обмеження | `attempt_count` — лічильник виконань без верхньої межі (`CHECK >= 0`); ліміт 5 стосується повторів однієї сторінки (`Retry`) |
+| 2 | Logic-to-Data | Перцентильний bootstrap-інтервал асиметричного розподілу може не містити точкову оцінку, що порушує `CHECK (ci_low <= score AND score <= ci_high)` | ALG-03, крок 8: `CI_low := MIN(CI_low; Score)`, `CI_high := MAX(CI_high; Score)` |
+| 3 | API-to-Database | API повертає 409 для того самого `Idempotency-Key` з іншим тілом, але БД не зберігала ознаки тіла запиту | Додано `request_hash char(64)` до `collection_runs` і `scoring_runs` |
+| 4 | API-to-Database | Контракт і SRS обмежували зберігання ключа 24 год, а `UNIQUE (project_id, idempotency_key)` діє безстроково | Ключ неповторюваний у межах проєкту без обмеження часу; SRS-FUN-06 і OpenAPI узгоджено |
+| 5 | API-to-Database | `ProjectCreate.description` має `maxLength: 2000`, колонка `text` не обмежена | Додано `CHECK (length(description) <= 2000)` |
+| 6 | Logic-to-Data | ALG-03 використовував `SATURATION(competitor_metrics)` без формули | Формулу визначено через кількість конкурентів і суму `GITHUB_STARS` |
+| 7 | Logic-to-Data | ALG-02 записує `cluster_memberships.probability`, але змінна `Probabilities` не була визначена | `Probabilities := HDBSCAN.probabilities` |
+| 8 | Logic-to-Data | ALG-03 впорядковує докази за `relevance`, яку не визначено, а `score_evidence.relevance` зберігається | `Relevance[i] := COSINE(X[i], CENTROID(Cluster[j]))` |
+| 9 | API Contract | Шаблон `\p{L}` у ключових словах потребує Unicode-прапорця регулярних виразів і не підтримується частиною генераторів стабів | Замінено на шаблон без Unicode-класів, що забороняє крайові пробіли і символи `< > { } "` |
+| 10 | API Contract | Поле `Argument.criterion` поєднувало `allOf` і `nullable` без `type` (помилка Redocly `nullable-type-sibling`) | Явний `type: string`, `nullable: true`, перелік значень з `null` |
+
+### 2.8.3. Production Readiness Report
+
+| Перевірка | Результат |
+|---|---|
+| ENUM-типи (11) у DECISIONS.md, ERD, OpenAPI | Ідентичні |
+| Поля API ↔ колонки БД (106 полів, 14 схем) | 0 розбіжностей; 23 похідні поля задокументовано |
+| Типи ідентифікаторів | `uuid` у БД — `format: uuid` в API; `audit_events.id` — `bigint` / `int64` |
+| Час | `timestamptz` у БД — `format: date-time` (RFC 3339, UTC) в API |
+| Числові оцінки | `numeric(5,2)` ↔ `multipleOf: 0.01`, діапазон 0–100; `numeric(4,3)` ↔ `multipleOf: 0.001`, 0–1 |
+| Статуси алгоритмів | `PENDING`, `RUNNING`, `COMPLETED`, `PARTIALLY_COMPLETED`, `FAILED` належать `run_status`; `SCORED` — `niche_status` |
+| Граничні випадки алгоритмів | Порожні дані, мала вибірка, тайм-аут, відмова джерела, ліміт ітерацій, ділення на нуль — оброблено |
+| Синтаксис | OpenAPI — Redocly 0/0; 10 діаграм Mermaid компілюються `mmdc` |
+| Критичні блокери (Showstoppers) | Відсутні |
+
+Висновок: специфікації моделі даних, API-контракту і алгоритмів узгоджені та готові до передачі в
+реалізацію (Розділ 3). Залишкові ризики, що не є блокерами: продуктивність HNSW-індексу понад 10⁶
+векторів і точність класифікатора скарг підлягають перевірці на етапі інструментального аудиту
+([SRS-NFR-PERF-04](srs.md#srs-nfr-perf-04), критерій F1 ≥ 0,80).
 
 ## Висновки до розділу 2

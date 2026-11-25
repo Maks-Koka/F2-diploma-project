@@ -1,0 +1,1539 @@
+openapi: 3.0.3
+info:
+  title: DemandLens Core API
+  version: 1.0.0
+  description: |
+    REST API платформи DemandLens (виявлення та оцінювання ринкових можливостей).
+    Контракт між контейнерами Web App / API Gateway і Core API (C4 Level 2).
+    Ідентифікатори маршрутів API-REQ-NN наведено в полі `x-route-id` кожної операції
+    і відповідають матриці в docs/2_design.md, підрозділ 2.5.
+    Поля JSON — snake_case і збігаються з назвами колонок моделі даних (підрозділ 2.7).
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: https://demandlens.test/api/v1
+    description: Локальне розгортання Docker Compose (API Gateway, домен у hosts-файлі)
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+    description: Видача і ротація токенів (модуль identity)
+  - name: projects
+    description: Дослідницькі проєкти
+  - name: collection
+    description: Запуски збору даних (Ingestion Worker)
+  - name: analytics
+    description: Скарги та кластери потреб
+  - name: scoring
+    description: Рейтинг ніш і пояснення
+  - name: competitors
+    description: Конкуренти ніш і їхні метрики
+  - name: reports
+    description: Експорт звітів
+  - name: admin
+    description: "Адміністрування — джерела даних, журнал аудиту"
+
+paths:
+  /auth/tokens:
+    post:
+      tags: [auth]
+      operationId: issueTokens
+      x-route-id: API-REQ-01
+      summary: Видача пари токенів за обліковими даними (SRS-FUN-01)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '201':
+          description: Токени видано
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/tokens/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshTokens
+      x-route-id: API-REQ-02
+      summary: Ротація refresh-токена (SRS-FUN-02)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '201':
+          description: Нову пару токенів видано, попередній refresh-токен відкликано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects:
+    post:
+      tags: [projects]
+      operationId: createProject
+      x-route-id: API-REQ-03
+      summary: Створення дослідницького проєкту (SRS-FUN-04)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+      responses:
+        '201':
+          description: Проєкт створено
+          headers:
+            Location:
+              schema:
+                type: string
+                example: /api/v1/projects/0193a6f2-3b1c-7c2e-9a51-6f1d2e3c4b5a
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [projects]
+      operationId: listProjects
+      x-route-id: API-REQ-04
+      summary: Перелік проєктів поточного користувача (SRS-FUN-05)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ProjectStatus'
+      responses:
+        '200':
+          description: Сторінка проєктів
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      operationId: getProject
+      x-route-id: API-REQ-05
+      summary: Картка проєкту (SRS-FUN-05)
+      responses:
+        '200':
+          description: Проєкт
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/collection-runs:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [collection]
+      operationId: startCollectionRun
+      x-route-id: API-REQ-06
+      summary: Запуск ідемпотентного збору даних (SRS-FUN-06)
+      description: |
+        Створює запуск зі статусом PENDING і ставить задачу в чергу `ingestion`.
+        Повторний запит із тим самим Idempotency-Key повертає наявний запуск (200); ключ неповторюваний у межах проєкту.
+        Той самий ключ з іншим тілом запиту — 409.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectionRunCreate'
+      responses:
+        '202':
+          description: Запуск створено і поставлено в чергу
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectionRun'
+        '200':
+          description: Повторний запит з тим самим ключем — повернуто наявний запуск
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectionRun'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /projects/{projectId}/collection-runs/{runId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: runId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [collection]
+      operationId: getCollectionRun
+      x-route-id: API-REQ-07
+      summary: Стан запуску збору (SRS-FUN-07)
+      responses:
+        '200':
+          description: Стан запуску з прогресом по джерелах
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectionRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/complaints:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [analytics]
+      operationId: listComplaints
+      x-route-id: API-REQ-08
+      summary: Перелік скарг проєкту (SRS-FUN-13)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: cluster_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: min_pain_score
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 0
+            maximum: 1
+            default: 0
+      responses:
+        '200':
+          description: Сторінка скарг, впорядкованих за pain_score за спаданням
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplaintPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/scoring-runs:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [scoring]
+      operationId: startScoringRun
+      x-route-id: API-REQ-09
+      summary: Запуск обчислення рейтингу ніш (SRS-FUN-17)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoringRunCreate'
+      responses:
+        '202':
+          description: Запуск оцінювання створено і поставлено в чергу
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoringRun'
+        '200':
+          description: Повторний запит з тим самим ключем — повернуто наявний запуск
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoringRun'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/niches:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [scoring]
+      operationId: listNiches
+      x-route-id: API-REQ-10
+      summary: Ранжований список ніш останнього завершеного оцінювання (SRS-FUN-20)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: scoring_run_id
+          in: query
+          required: false
+          description: Запуск оцінювання; за замовчуванням — останній зі статусом COMPLETED
+          schema:
+            type: string
+            format: uuid
+        - name: uncertainty_level
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/UncertaintyLevel'
+      responses:
+        '200':
+          description: Сторінка ніш за rank за зростанням
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NichePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/niches/{nicheId}/explanation:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/NicheId'
+    get:
+      tags: [scoring]
+      operationId: getNicheExplanation
+      x-route-id: API-REQ-11
+      summary: Пояснення рейтингу ніші (SRS-FUN-19)
+      parameters:
+        - name: scoring_run_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Пояснення з внесками критеріїв, доказами, аргументами і довірчим інтервалом
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NicheExplanation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/competitors:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [competitors]
+      operationId: createCompetitor
+      x-route-id: API-REQ-12
+      summary: Реєстрація конкурента ніші (SRS-FUN-14)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompetitorCreate'
+      responses:
+        '201':
+          description: Конкурента зареєстровано; збір метрик поставлено в чергу
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Competitor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/niches/{nicheId}/competitors:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/NicheId'
+    get:
+      tags: [competitors]
+      operationId: listNicheCompetitors
+      x-route-id: API-REQ-13
+      summary: Порівняння конкурентів ніші (SRS-FUN-16)
+      responses:
+        '200':
+          description: Конкуренти з останніми значеннями метрик
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompetitorComparison'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /projects/{projectId}/reports:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [reports]
+      operationId: createReport
+      x-route-id: API-REQ-14
+      summary: Формування звіту JSON або CSV (SRS-FUN-21)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportCreate'
+      responses:
+        '201':
+          description: Звіт сформовано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /data-sources:
+    get:
+      tags: [admin]
+      operationId: listDataSources
+      x-route-id: API-REQ-15
+      summary: Перелік джерел даних (SRS-FUN-25)
+      responses:
+        '200':
+          description: Джерела даних
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 20
+                items:
+                  $ref: '#/components/schemas/DataSource'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /data-sources/{sourceCode}:
+    parameters:
+      - name: sourceCode
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/SourceCode'
+    patch:
+      tags: [admin]
+      operationId: updateDataSource
+      x-route-id: API-REQ-16
+      summary: Зміна налаштувань джерела (SRS-FUN-24), лише ADMIN
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: Значення version з попередньої відповіді (оптимістичне блокування)
+          schema:
+            type: string
+            pattern: '^[0-9]{1,9}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DataSourcePatch'
+      responses:
+        '200':
+          description: Налаштування оновлено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataSource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /audit-events:
+    get:
+      tags: [admin]
+      operationId: listAuditEvents
+      x-route-id: API-REQ-17
+      summary: Журнал аудиту (SRS-FUN-23), лише ADMIN
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: actor_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[a-z]+(\.[a-z_]+)+$'
+            maxLength: 64
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Сторінка подій аудиту
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access JWT, підпис RS256, TTL 15 хв. Claims: sub (uuid користувача), role (ANALYST | ADMIN),
+        iss, aud, exp, iat, jti. Публічний ключ — GET /.well-known/jwks.json.
+
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    NicheId:
+      name: nicheId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 10000
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Неповторюваний у межах проєкту ключ запиту клієнта (UUID або 16–64 символи); зберігається разом із запуском
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 64
+        pattern: '^[A-Za-z0-9_-]{16,64}$'
+
+  responses:
+    BadRequest:
+      description: Некоректний синтаксис запиту (невалідний JSON, неправильний тип параметра)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Відсутній, прострочений або невалідний токен
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer error="invalid_token"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Роль користувача не дозволяє виконати операцію
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Ресурс не існує або не належить користувачу (захист від BOLA/IDOR)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Конфлікт стану (ключ ідемпотентності з іншим тілом, дубліката імені, версія If-Match)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnprocessableEntity:
+      description: Помилка валідації полів
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Перевищено ліміт запитів
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 3600
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Внутрішня помилка сервера (без деталей реалізації)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: Черга задач недоступна; повторіть запит пізніше
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 3600
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message, trace_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          example: VALIDATION_FAILED
+        message:
+          type: string
+          maxLength: 500
+        details:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [field, issue]
+            additionalProperties: false
+            properties:
+              field:
+                type: string
+                maxLength: 100
+              issue:
+                type: string
+                maxLength: 200
+        trace_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+
+    UserRole:
+      type: string
+      enum: [ANALYST, ADMIN]
+    ProjectStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, ARCHIVED]
+    RunStatus:
+      type: string
+      enum: [PENDING, RUNNING, COMPLETED, PARTIALLY_COMPLETED, FAILED, CANCELLED]
+    SourceCode:
+      type: string
+      enum: [HACKER_NEWS, STACK_EXCHANGE, GITHUB_ISSUES, WIKIMEDIA_PAGEVIEWS, REDDIT]
+    DetectionMethod:
+      type: string
+      enum: [LEXICON, CLASSIFIER]
+    NicheStatus:
+      type: string
+      enum: [CANDIDATE, SCORED, ARCHIVED]
+    UncertaintyLevel:
+      type: string
+      enum: [LOW, MEDIUM, HIGH]
+    CriterionCode:
+      type: string
+      enum: [DEMAND_VOLUME, PAIN_INTENSITY, GROWTH_TREND, COMPETITION_GAP, SOURCE_DIVERSITY]
+    ArgumentKind:
+      type: string
+      enum: [PRO, RISK]
+    ReportFormat:
+      type: string
+      enum: [JSON, CSV]
+    CompetitorMetric:
+      type: string
+      enum: [GITHUB_STARS, GITHUB_OPEN_ISSUES, GITHUB_RELEASES_12M, HN_MENTIONS_90D]
+
+    PageMeta:
+      type: object
+      required: [page, page_size, total]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          minimum: 0
+
+    TokenRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 128
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      additionalProperties: false
+      properties:
+        refresh_token:
+          type: string
+          minLength: 32
+          maxLength: 512
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          minimum: 1
+          maximum: 900
+          example: 900
+        user:
+          type: object
+          required: [id, email, role]
+          properties:
+            id:
+              type: string
+              format: uuid
+            email:
+              type: string
+              format: email
+            role:
+              $ref: '#/components/schemas/UserRole'
+
+    ProjectCreate:
+      type: object
+      required: [title, keywords, source_codes]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        keywords:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 2
+            maxLength: 100
+            pattern: '^[^\s<>{}"]([^<>{}"]*[^\s<>{}"])?$'
+            description: Без пробілів на краях і без символів < > { } " (захист від ін'єкцій у шаблони)
+        source_codes:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/SourceCode'
+    Project:
+      type: object
+      required: [id, owner_id, title, keywords, source_codes, status, created_at, updated_at, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        owner_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        keywords:
+          type: array
+          items:
+            type: string
+        source_codes:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceCode'
+        status:
+          $ref: '#/components/schemas/ProjectStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+    ProjectPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/Project'
+
+    CollectionRunCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        source_codes:
+          type: array
+          description: Підмножина джерел проєкту; за замовчуванням — усі джерела проєкту
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/SourceCode'
+    CollectionRunSource:
+      type: object
+      required: [source_code, status, pages_fetched, documents_fetched, attempt_count]
+      properties:
+        source_code:
+          $ref: '#/components/schemas/SourceCode'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        pages_fetched:
+          type: integer
+          minimum: 0
+        documents_fetched:
+          type: integer
+          minimum: 0
+        attempt_count:
+          type: integer
+          minimum: 0
+        last_error_code:
+          type: string
+          nullable: true
+          maxLength: 64
+        next_retry_at:
+          type: string
+          format: date-time
+          nullable: true
+    CollectionRun:
+      type: object
+      required: [id, project_id, status, documents_fetched, attempt_count, sources, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        documents_fetched:
+          type: integer
+          minimum: 0
+        attempt_count:
+          type: integer
+          minimum: 0
+        error_code:
+          type: string
+          nullable: true
+          maxLength: 64
+        sources:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/CollectionRunSource'
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Complaint:
+      type: object
+      required: [id, document_id, text, pain_score, detection_method, source_code, url]
+      properties:
+        id:
+          type: string
+          format: uuid
+        document_id:
+          type: string
+          format: uuid
+        cluster_id:
+          type: string
+          format: uuid
+          nullable: true
+        text:
+          type: string
+          maxLength: 2000
+        pain_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          multipleOf: 0.001
+        detection_method:
+          $ref: '#/components/schemas/DetectionMethod'
+        source_code:
+          $ref: '#/components/schemas/SourceCode'
+        url:
+          type: string
+          format: uri
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+    ComplaintPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/Complaint'
+
+    ScoringRunCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        scoring_model_version:
+          type: string
+          description: Версія моделі; за замовчуванням — активна
+          pattern: '^\d+\.\d+\.\d+$'
+          maxLength: 20
+    ScoringRun:
+      type: object
+      required: [id, project_id, scoring_model_version, clustering_run_id, status, niches_scored, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        scoring_model_version:
+          type: string
+        clustering_run_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        niches_scored:
+          type: integer
+          minimum: 0
+        error_code:
+          type: string
+          nullable: true
+          maxLength: 64
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ConfidenceInterval:
+      type: object
+      required: [ci_low, ci_high, level]
+      properties:
+        ci_low:
+          type: number
+          minimum: 0
+          maximum: 100
+          multipleOf: 0.01
+        ci_high:
+          type: number
+          minimum: 0
+          maximum: 100
+          multipleOf: 0.01
+        level:
+          type: number
+          enum: [0.95]
+    NicheSummary:
+      type: object
+      required: [id, name, status, rank, score, confidence_interval, uncertainty_level, complaints_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/NicheStatus'
+        rank:
+          type: integer
+          minimum: 1
+        score:
+          type: number
+          minimum: 0
+          maximum: 100
+          multipleOf: 0.01
+        confidence_interval:
+          $ref: '#/components/schemas/ConfidenceInterval'
+        uncertainty_level:
+          $ref: '#/components/schemas/UncertaintyLevel'
+        complaints_count:
+          type: integer
+          minimum: 0
+    NichePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [scoring_run_id, scoring_model_version, items]
+          properties:
+            scoring_run_id:
+              type: string
+              format: uuid
+            scoring_model_version:
+              type: string
+            items:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/NicheSummary'
+    ScoreComponent:
+      type: object
+      required: [criterion, raw_value, normalized_value, weight, contribution]
+      properties:
+        criterion:
+          $ref: '#/components/schemas/CriterionCode'
+        raw_value:
+          type: number
+        normalized_value:
+          type: number
+          minimum: 0
+          maximum: 1
+        weight:
+          type: number
+          minimum: 0
+          maximum: 1
+        contribution:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: 100 × weight × normalized_value (обчислюється, не зберігається)
+    Evidence:
+      type: object
+      required: [complaint_id, rank, text, url, source_code, pain_score, relevance]
+      properties:
+        complaint_id:
+          type: string
+          format: uuid
+        rank:
+          type: integer
+          minimum: 1
+          maximum: 10
+        text:
+          type: string
+          maxLength: 2000
+        url:
+          type: string
+          format: uri
+        source_code:
+          $ref: '#/components/schemas/SourceCode'
+        pain_score:
+          type: number
+          minimum: 0
+          maximum: 1
+        relevance:
+          type: number
+          minimum: 0
+          maximum: 1
+    Argument:
+      type: object
+      required: [kind, text]
+      properties:
+        kind:
+          $ref: '#/components/schemas/ArgumentKind'
+        criterion:
+          type: string
+          nullable: true
+          description: Критерій, з яким пов'язано аргумент; null — загальний аргумент
+          enum: [DEMAND_VOLUME, PAIN_INTENSITY, GROWTH_TREND, COMPETITION_GAP, SOURCE_DIVERSITY, null]
+        text:
+          type: string
+          maxLength: 500
+    NicheExplanation:
+      type: object
+      required: [niche, scoring_run_id, scoring_model_version, components, evidence, pros, risks]
+      properties:
+        niche:
+          $ref: '#/components/schemas/NicheSummary'
+        scoring_run_id:
+          type: string
+          format: uuid
+        scoring_model_version:
+          type: string
+        components:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/ScoreComponent'
+        evidence:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Evidence'
+        pros:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Argument'
+        risks:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/Argument'
+
+    CompetitorCreate:
+      type: object
+      required: [niche_id, name]
+      additionalProperties: false
+      properties:
+        niche_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 2
+          maxLength: 200
+        website_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          pattern: '^https://'
+        github_repo:
+          type: string
+          maxLength: 140
+          pattern: '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
+    CompetitorMetricValue:
+      type: object
+      required: [metric, value, captured_at]
+      properties:
+        metric:
+          $ref: '#/components/schemas/CompetitorMetric'
+        value:
+          type: number
+          minimum: 0
+        captured_at:
+          type: string
+          format: date-time
+    Competitor:
+      type: object
+      required: [id, niche_id, name, created_at, version, metrics]
+      properties:
+        id:
+          type: string
+          format: uuid
+        niche_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        website_url:
+          type: string
+          format: uri
+          nullable: true
+        github_repo:
+          type: string
+          nullable: true
+        metrics:
+          type: array
+          maxItems: 4
+          items:
+            $ref: '#/components/schemas/CompetitorMetricValue'
+        created_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+    CompetitorComparison:
+      type: object
+      required: [niche_id, items]
+      properties:
+        niche_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/Competitor'
+
+    ReportCreate:
+      type: object
+      required: [format]
+      additionalProperties: false
+      properties:
+        format:
+          $ref: '#/components/schemas/ReportFormat'
+        scoring_run_id:
+          type: string
+          format: uuid
+          description: За замовчуванням — останній завершений запуск оцінювання
+    Report:
+      type: object
+      required: [id, project_id, scoring_run_id, format, status, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        scoring_run_id:
+          type: string
+          format: uuid
+        format:
+          $ref: '#/components/schemas/ReportFormat'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        download_url:
+          type: string
+          format: uri
+          nullable: true
+        size_bytes:
+          type: integer
+          minimum: 0
+          nullable: true
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    DataSource:
+      type: object
+      required: [code, name, is_enabled, rate_limit_per_hour, quota_share, tos_url, license, version]
+      properties:
+        code:
+          $ref: '#/components/schemas/SourceCode'
+        name:
+          type: string
+          maxLength: 100
+        is_enabled:
+          type: boolean
+        rate_limit_per_hour:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        quota_share:
+          type: number
+          minimum: 0.01
+          maximum: 1
+          multipleOf: 0.01
+        tos_url:
+          type: string
+          format: uri
+        license:
+          type: string
+          maxLength: 100
+        version:
+          type: integer
+          minimum: 1
+    DataSourcePatch:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        is_enabled:
+          type: boolean
+        rate_limit_per_hour:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        quota_share:
+          type: number
+          minimum: 0.01
+          maximum: 1
+          multipleOf: 0.01
+
+    AuditEvent:
+      type: object
+      required: [id, action, entity_type, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+        action:
+          type: string
+          maxLength: 64
+          example: project.create
+        entity_type:
+          type: string
+          maxLength: 64
+        entity_id:
+          type: string
+          format: uuid
+          nullable: true
+        ip:
+          type: string
+          maxLength: 45
+          nullable: true
+        trace_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    AuditEventPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/AuditEvent'
