@@ -55,10 +55,13 @@ def render_mermaid(code: str) -> Path:
         src.write_text(code, encoding="utf-8")
         cfg = CACHE / "config.json"
         cfg.write_text(json.dumps({"theme": "default", "themeVariables": {"fontFamily": "Arial"}}), encoding="utf-8")
-        subprocess.run(
-            [mmdc_cmd(), "-i", str(src), "-o", str(out), "-s", "2", "-b", "white", "-c", str(cfg), "-w", "1400"],
-            check=True, capture_output=True,
+        proc = subprocess.run(
+            [mmdc_cmd(), "-i", str(src), "-o", str(out), "-s", "2", "-b", "white", "-c", str(cfg)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
+        # На Windows mmdc повертає ненульовий код через повідомлення taskkill; критерій — наявність PNG.
+        if not out.exists():
+            raise RuntimeError(f"Mermaid render failed for {src}:\n{proc.stdout}\n{proc.stderr}")
     return out
 
 
@@ -90,6 +93,10 @@ def set_base_styles(doc: Document) -> None:
             rpr.append(rfonts)
         for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
             rfonts.set(qn(attr), FONT)
+        # Тема документа (Calibri Light) має пріоритет над явним шрифтом — прибрати theme-атрибути.
+        for attr in ("w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:cstheme"):
+            if rfonts.get(qn(attr)) is not None:
+                del rfonts.attrib[qn(attr)]
         hs.paragraph_format.space_before = Pt(12)
         hs.paragraph_format.space_after = Pt(6)
         hs.paragraph_format.keep_with_next = True
@@ -164,6 +171,42 @@ def add_table(doc: Document, rows: list[list[str]]) -> None:
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     set_cell_border(table)
     size = Pt(11) if ncols >= 5 else Pt(12)
+    # Ширина колонок пропорційна середній довжині тексту (мінімум 1,8 см), загальна — 16,5 см.
+    import statistics
+    weights = []
+    for j in range(ncols):
+        lens = [len(r[j]) if j < len(r) else 0 for r in rows]
+        weights.append(max(6.0, min(statistics.mean(lens) * 0.6 + max(lens) * 0.4, 120.0)))
+    total = sum(weights)
+    char_cm = 0.24 if ncols >= 5 else 0.27
+    mins = []
+    for j in range(ncols):
+        words = [w for r in rows if j < len(r) for w in re.split(r"[\s<>]+", r[j].replace("`", ""))]
+        longest = max((len(w) for w in words), default=4)
+        mins.append(max(1.6, min(longest, 18) * char_cm + 0.5))
+    # Ітеративно: колонки, що впираються в мінімум, фіксуються; решта ділить залишок пропорційно вагам.
+    fixed: dict[int, float] = {}
+    for _ in range(ncols):
+        free = [j for j in range(ncols) if j not in fixed]
+        rest = 16.5 - sum(fixed.values())
+        wsum = sum(weights[j] for j in free) or 1.0
+        changed = False
+        for j in free:
+            if rest * weights[j] / wsum < mins[j]:
+                fixed[j] = mins[j]
+                changed = True
+        if not changed:
+            break
+    free = [j for j in range(ncols) if j not in fixed]
+    rest = max(16.5 - sum(fixed.values()), 0.5 * len(free))
+    wsum = sum(weights[j] for j in free) or 1.0
+    widths = [fixed.get(j, rest * weights[j] / wsum) for j in range(ncols)]
+    table.autofit = False
+    for j, gc in enumerate(table._tbl.tblGrid.gridCol_lst):
+        gc.w = Cm(widths[j])
+    for j, w in enumerate(widths):
+        for cell in table.columns[j].cells:
+            cell.width = Cm(w)
     for i, row in enumerate(rows):
         for j in range(ncols):
             cell = table.cell(i, j)
@@ -300,10 +343,14 @@ def render_markdown(doc: Document, md: str, base: Path, figure_counter: list[int
             continue
         if s.startswith(">"):
             flush()
+            quote = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote.append(lines[i].strip().lstrip(">").strip())
+                i += 1
             p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             p.paragraph_format.left_indent = Cm(1)
-            add_inline(p, s.lstrip("> ").strip(), size=Pt(12))
-            i += 1
+            add_inline(p, " ".join(q for q in quote if q), size=Pt(12))
             continue
         if not s:
             flush()
@@ -314,7 +361,30 @@ def render_markdown(doc: Document, md: str, base: Path, figure_counter: list[int
     flush()
 
 
-INCLUDE = re.compile(r"^\{\{include\s+(\S+)(?:\s+shift=(\d))?(?:\s+skip_h1)?\}\}\s*$")
+INCLUDE = re.compile(r"^\{\{include\s+(\S+)(?:\s+shift=(\d))?(?:\s+section=(\S+))?(?:\s+skip_h1)?\}\}\s*$")
+
+
+def cut_section(text: str, number: str) -> str:
+    """Повертає підрозділ '## <number>. ...' до наступного заголовка того самого або вищого рівня."""
+    lines = text.split("\n")
+    start = level = None
+    for idx, ln in enumerate(lines):
+        m = re.match(r"^(#{1,6})\s+" + re.escape(number) + r"[.\s]", ln)
+        if m:
+            start, level = idx, len(m.group(1))
+            break
+    if start is None:
+        raise ValueError(f"section {number} not found")
+    end = len(lines)
+    in_code = False
+    for idx in range(start + 1, len(lines)):
+        if lines[idx].strip().startswith("```"):
+            in_code = not in_code
+        m = re.match(r"^(#{1,6})\s", lines[idx])
+        if m and not in_code and len(m.group(1)) <= level:
+            end = idx
+            break
+    return "\n".join(lines[start:end])
 
 
 def expand_includes(md: str, base: Path) -> str:
@@ -328,6 +398,8 @@ def expand_includes(md: str, base: Path) -> str:
         path = (base / m.group(1)).resolve()
         shift = int(m.group(2) or 0)
         text = expand_includes(path.read_text(encoding="utf-8"), path.parent)
+        if m.group(3):
+            text = cut_section(text, m.group(3))
         lines = text.split("\n")
         if "skip_h1" in line and lines and lines[0].startswith("# "):
             lines = lines[1:]
@@ -356,7 +428,8 @@ def title_page(doc: Document, spec: dict) -> None:
 
     centered("Міністерство освіти і науки України")
     centered(UNIVERSITY)
-    for _ in range(6):
+    gap = 6 if t["kind"] == "report" else 4
+    for _ in range(gap):
         doc.add_paragraph()
     if t["kind"] == "report":
         centered("ЗВІТ", bold=True, size=16)
@@ -368,7 +441,7 @@ def title_page(doc: Document, spec: dict) -> None:
         centered("кваліфікаційної роботи бакалавра")
         centered("на тему: «Інтелектуальна платформа виявлення та оцінювання ринкових можливостей»")
         centered("(DemandLens)")
-    for _ in range(5):
+    for _ in range(gap - 1):
         doc.add_paragraph()
     for line in (
         "Виконав: студент 4 курсу",
@@ -379,7 +452,7 @@ def title_page(doc: Document, spec: dict) -> None:
         p = doc.add_paragraph()
         p.paragraph_format.left_indent = Cm(9)
         p.add_run(line)
-    for _ in range(4):
+    for _ in range(gap - 2):
         doc.add_paragraph()
     centered(f"Чернівці — {t.get('year', 2026)}")
     doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
@@ -394,6 +467,7 @@ def main() -> None:
     for k, src in enumerate(spec["sources"]):
         path = (ROOT / src).resolve()
         md = expand_includes(path.read_text(encoding="utf-8"), path.parent)
+        md = re.sub(r'<a id="[^"]*"></a>', "", md)  # HTML-якорі для GitHub не потрібні у .docx
         if k and spec.get("page_break_between", True):
             doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         render_markdown(doc, md, path.parent, figure_counter)
