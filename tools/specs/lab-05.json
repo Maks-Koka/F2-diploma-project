@@ -1,0 +1,5 @@
+{
+  "output": "labs/lab-05/Лабораторна_5_Кока_МС.docx",
+  "title": {"kind": "report", "lab": 5, "topic": "Архітектурне проєктування та специфікація вимог за методологією Docs-as-Code: SRS (ISO/IEC/IEEE 29148), C4 Model (Levels 1–3) та ADR"},
+  "sources": ["labs/lab-05/report.md"]
+}
