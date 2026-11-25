@@ -428,7 +428,7 @@ def title_page(doc: Document, spec: dict) -> None:
 
     centered("Міністерство освіти і науки України")
     centered(UNIVERSITY)
-    gap = 6 if t["kind"] == "report" else 4
+    gap = 6 if t["kind"] == "report" and len(t.get("topic", "")) < 140 else 4
     for _ in range(gap):
         doc.add_paragraph()
     if t["kind"] == "report":

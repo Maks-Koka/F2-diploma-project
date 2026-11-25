@@ -1,0 +1,5 @@
+{
+  "output": "labs/lab-06/Лабораторна_6_Кока_МС.docx",
+  "title": {"kind": "report", "lab": 6, "topic": "Проєктування та документування даних, міжсервісних контрактів та алгоритмів критичних вузлів (Data, API & Logic Engineering) за методологією Docs-as-Code"},
+  "sources": ["labs/lab-06/report.md"]
+}

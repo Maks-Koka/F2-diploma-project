@@ -75,12 +75,12 @@ Notion-синхронізацію великих Markdown-файлів вико�
 
 ## ЛР№6 (`feature/chapter2-architecture-data-api-logic`)
 
-- [ ] ERD (Mermaid) + специфікація таблиць + план індексів
-- [ ] `docs/api/openapi.yaml` (валідовано Redocly)
-- [ ] 3 алгоритми (текст + `graph TD`)
-- [ ] Інтеграційний аудит + Production Readiness Report
-- [ ] `labs/lab-06/` повний комплект + таблиця нумерації, звіт `.docx`
-- [ ] PR у `main`
+- [x] ERD (Mermaid) + специфікація таблиць + план індексів
+- [x] `docs/api/openapi.yaml` (валідовано Redocly)
+- [x] 3 алгоритми (текст + `graph TD`)
+- [x] Інтеграційний аудит + Production Readiness Report
+- [x] `labs/lab-06/` повний комплект + таблиця нумерації, звіт `.docx`
+- [x] PR у `main`
 
 ## ЛР№7 (`feature/chapter2-consolidation`)
 
