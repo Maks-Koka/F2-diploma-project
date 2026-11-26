@@ -1,0 +1,5 @@
+{
+  "output": "labs/lab-07/F2_Diploma_Chapters1-2_Кока.docx",
+  "title": {"kind": "chapter", "heading": "РОЗДІЛИ 1–2. АНАЛІЗ ПРЕДМЕТНОЇ ОБЛАСТІ ТА ПРОЄКТУВАННЯ СИСТЕМИ"},
+  "sources": ["docs/1_analysis.md", "docs/2_design.md"]
+}

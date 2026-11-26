@@ -84,14 +84,14 @@ Notion-синхронізацію великих Markdown-файлів вико�
 
 ## ЛР№7 (`feature/chapter2-consolidation`)
 
-- [ ] 2.1 обґрунтування архітектури (≥ 1 с.)
-- [ ] Use Case діаграма StarUML (`.mdj` + PNG) + 3 специфікації UC
-- [ ] Топологія API + Data Flows
-- [ ] Серверне ядро + AppSec
-- [ ] `.markdownlint.json`, `.github/workflows/docs-linter.yml`, зелений CI
-- [ ] `F2_Diploma_Chapters1-2_Кока.docx`
-- [ ] `labs/lab-07/` повний комплект, звіт `.docx`
-- [ ] PR у `main`
+- [x] 2.1 обґрунтування архітектури (≥ 1 с.)
+- [x] Use Case діаграма StarUML (`.mdj` + PNG) + 3 специфікації UC
+- [x] Топологія API + Data Flows
+- [x] Серверне ядро + AppSec
+- [x] `.markdownlint.json`, `.github/workflows/docs-linter.yml`, зелений CI
+- [x] `F2_Diploma_Chapters1-2_Кока.docx`
+- [x] `labs/lab-07/` повний комплект, звіт `.docx`
+- [x] PR у `main`
 
 ## Фінал
 

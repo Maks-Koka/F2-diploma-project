@@ -400,6 +400,9 @@ def expand_includes(md: str, base: Path) -> str:
         text = expand_includes(path.read_text(encoding="utf-8"), path.parent)
         if m.group(3):
             text = cut_section(text, m.group(3))
+        # Відносні шляхи зображень вкладеного файлу перетворюються на абсолютні.
+        text = re.sub(r"!\[([^\]]*)\]\((?!https?:)([^)]+)\)",
+                      lambda mm: f"![{mm.group(1)}]({(path.parent / mm.group(2)).resolve().as_posix()})", text)
         lines = text.split("\n")
         if "skip_h1" in line and lines and lines[0].startswith("# "):
             lines = lines[1:]
@@ -428,7 +431,7 @@ def title_page(doc: Document, spec: dict) -> None:
 
     centered("Міністерство освіти і науки України")
     centered(UNIVERSITY)
-    gap = 6 if t["kind"] == "report" and len(t.get("topic", "")) < 140 else 4
+    gap = 6 if t["kind"] == "report" and len(t.get("topic", "")) < 140 else (4 if t["kind"] != "report" else 3)
     for _ in range(gap):
         doc.add_paragraph()
     if t["kind"] == "report":
