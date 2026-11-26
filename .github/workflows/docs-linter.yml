@@ -1,0 +1,53 @@
+name: Docs Quality Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "labs/**/*.md"
+      - ".markdownlint.json"
+      - ".vale.ini"
+      - ".vale/**"
+      - ".github/workflows/docs-linter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  markdownlint:
+    name: markdownlint (структура Markdown)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v20
+        with:
+          config: .markdownlint.json
+          globs: |
+            docs/**/*.md
+            labs/**/*.md
+            !labs/**/report.md
+            !labs/**/pr-body.md
+
+  vale:
+    name: Vale (стиль ДСТУ 3008, транслітерації)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: errata-ai/vale-action@v2
+        with:
+          files: docs
+          fail_on_error: true
+          reporter: github-check
+          filter_mode: nofilter
+
+  openapi:
+    name: OpenAPI contract (Redocly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npx --yes @redocly/cli@1 lint docs/api/openapi.yaml
