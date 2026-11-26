@@ -11,7 +11,7 @@
 | [proposal.md](proposal.md) | Технічна картка проєкту (Thesis Proposal) | Готово |
 | [0_intro.md](0_intro.md) | Вступ і науковий апарат | Готово |
 | [1_analysis.md](1_analysis.md) | Розділ 1. Аналіз предметної області та постановка задачі | Готово |
-| [2_design.md](2_design.md) | Розділ 2. Обґрунтування архітектурних рішень та проєктування системи | У роботі (2.1–2.3, 2.5, 2.7, 2.8) |
+| [2_design.md](2_design.md) | Розділ 2. Обґрунтування архітектурних рішень та проєктування системи | Готово (2.1–2.8, висновки) |
 | [srs.md](srs.md) | Специфікація вимог (ISO/IEC/IEEE 29148): 25 FR, 23 NFR, критерії верифікації, глосарій | Готово |
 | [adr/](adr/) | Реєстр архітектурних рішень: [ADR-001](adr/0001-choice-of-technology.md) (Approved) | Готово |
 | [api/openapi.yaml](api/openapi.yaml) | Контракт REST API (OpenAPI 3.0.3, 17 операцій, Redocly: 0 помилок) | Готово |
@@ -56,6 +56,14 @@ gantt
 | Локальний `.docx` (17 с.) | [labs/lab-04/F2_Diploma_Chapter1_Кока.docx](../labs/lab-04/F2_Diploma_Chapter1_Кока.docx) | Публічний репозиторій |
 | Хмарний робочий документ | Notion: сторінка «Розділ 1 (робочий документ)» у просторі `F2_Diploma_Кока_МС` | Can comment для викладача і керівника (надається студентом) |
 
+## Розділи 1–2 у форматі документа
+
+| Формат | Розташування |
+|---|---|
+| Локальний `.docx` | [labs/lab-07/F2_Diploma_Chapters1-2_Кока.docx](../labs/lab-07/F2_Diploma_Chapters1-2_Кока.docx) |
+| Діаграма прецедентів (StarUML) | [uml/use-case-diagram.mdj](uml/use-case-diagram.mdj), [PNG](uml/use-case-diagram.png) |
+| Docs Quality Gate | Workflow `.github/workflows/docs-linter.yml` (markdownlint, Vale, Redocly) |
+
 ## NFR Matrix
 
 | ID | Категорія | Цільове значення | Інструмент верифікації |
@@ -83,4 +91,5 @@ gantt
 | ЛР№3 | [1_analysis.md](1_analysis.md) → 1.3, [labs/lab-03](../labs/lab-03/) | `feature/chapter1-analytics` |
 | ЛР№4 | [1_analysis.md](1_analysis.md) → 1.1–1.5 і висновки, NFR Matrix, [labs/lab-04](../labs/lab-04/) | `feature/chapter1-final` |
 | ЛР№5 | [srs.md](srs.md), [2_design.md](2_design.md) → 2.1–2.3, [ADR-001](adr/0001-choice-of-technology.md), [labs/lab-05](../labs/lab-05/) | `feature/chapter2-architecture` |
+| ЛР№7 | [2_design.md](2_design.md) → 2.1, 2.3.1, 2.4, 2.5.2–2.5.3, 2.6; Docs Quality Gate, [labs/lab-07](../labs/lab-07/) | `feature/chapter2-consolidation` |
 | ЛР№6 | [2_design.md](2_design.md) → 2.5, 2.7, 2.8; [api/openapi.yaml](api/openapi.yaml), [labs/lab-06](../labs/lab-06/) | `feature/chapter2-architecture-data-api-logic` |

@@ -11,6 +11,72 @@
 |---|---|---|---|
 | [ADR-001](adr/0001-choice-of-technology.md) | Асинхронний конвеєр обробки на Celery + Redis у межах модульного моноліту замість брокера подій Apache Kafka або RabbitMQ | Approved | [SRS-NFR-PERF-03](srs.md#srs-nfr-perf-03), [SRS-NFR-REL-03](srs.md#srs-nfr-rel-03), [SRS-NFR-SCAL-01](srs.md#srs-nfr-scal-01) |
 
+### 2.1.2. Глобальний архітектурний стиль
+
+Для системи DemandLens обрано модульний моноліт з асинхронним конвеєром обробки даних. Core API на
+Django REST Framework є єдиним розгортуваним вебпроцесом із чіткими межами модулів `identity`,
+`projects`, `ingestion`, `analytics`, `scoring`, `reporting`; модулі взаємодіють лише через публічні
+сервіси і порти, а не через спільні моделі ORM. Тривалі операції винесено в два окремі контейнери
+Celery — Ingestion Worker (I/O-навантаження, обмежене квотами джерел) і Analytics Worker
+(CPU-навантаження класифікації, кластеризації і bootstrap). Такий поділ дозволяє масштабувати
+обчислення незалежно від HTTP-шару: вимога [SRS-NFR-SCAL-01](srs.md#srs-nfr-scal-01) (приріст ≥ 3,2
+раза при 1 → 4 обробниках) виконується збільшенням кількості контейнерів Analytics Worker, а вимога
+[SRS-NFR-PERF-03](srs.md#srs-nfr-perf-03) (p95 ≤ 150 мс) — тим, що HTTP-запит лише записує запуск і
+публікує задачу.
+
+Мікросервісний стиль відхилено з кількісних причин: обсяг до 10⁵ документів на добу (≈ 1,2 задачі/с)
+не потребує незалежного розгортання сервісів, а розподіл даних між сервісами замінив би локальні
+транзакції PostgreSQL на розподілені з компенсаціями (Saga) без виграшу в продуктивності. Вимога
+[SRS-NFR-PERF-01](srs.md#srs-nfr-perf-01) (p95 ≤ 200 мс при 200 RPS) досягається читанням рейтингу з
+репліки та кешем Cache-Aside у Redis з ключем, що містить `scoring_run_id`: повторне читання одного
+запуску не звертається до БД, а новий запуск автоматично інвалідує кеш через зміну ключа.
+
+### 2.1.3. Патерни мікрорівня
+
+| Патерн | Де застосовано | Проблема, яку розв'язує |
+|---|---|---|
+| Ports and Adapters (Clean Architecture) | Ядро модулів залежить від `Protocol`-інтерфейсів, адаптери ORM, Redis, Celery їх реалізують | Ізоляція домену від фреймворку; модульні тести ядра без БД |
+| Repository | `NicheRepository`, `ScoreRepository`, `DocumentRepository` | Інкапсуляція запитів ORM і маршрутизації primary/replica |
+| Unit of Work | `transaction.atomic` + `on_commit` у прикладних сервісах | Атомарний запис запуску і подій аудиту; публікація задачі лише після фіксації |
+| Strategy | `CriterionCalculator` для 5 критеріїв; `SourceAdapter` для 4 API | Додавання критерію або джерела без зміни ALG-01 і ALG-03 |
+| Idempotent Consumer | Задачі `collect`, `cluster`, `score` перевіряють статус запуску | Безпечна повторна доставка at-least-once (ADR-001) |
+| Retry з експоненційним backoff і jitter | ALG-01 | Тимчасові 429/5xx без синхронізованих повторів |
+| Circuit Breaker | Окремий стан на кожне джерело в Redis | Запобігання каскадним збоям і витраті квоти на недоступне джерело |
+| Token Bucket | Ліміт частоти на джерело (80 % квоти) і на користувача API | Дотримання умов джерел, захист від перевантаження |
+| Dependency Injection | Фабрика сервісів у шарі Inbound | Заміна адаптерів у тестах, відсутність глобального стану |
+
+CQRS у повній формі (окремі моделі запису і читання з асинхронною синхронізацією) не застосовано:
+для одного розробника це подвоїло б кількість моделей. Використано спрощену форму — читання рейтингу
+з репліки та кешу, запис у primary.
+
+### 2.1.4. Відмовостійкість, узгодженість і ризики
+
+Circuit Breaker ізолює відмову зовнішнього джерела: після 5 послідовних помилок джерело переходить у
+стан Open на 60 с, задача продовжує збір з інших джерел і завершується зі статусом
+`PARTIALLY_COMPLETED` ([SRS-NFR-REL-04](srs.md#srs-nfr-rel-04)). Без цього патерна недоступність
+одного API при 5 повторах з backoff до 300 с блокувала б обробник до 15 хв на кожному запуску.
+
+Між записом документів і появою рейтингу існує вікно eventual consistency: рейтинг оновлюється після
+завершення ланцюжка `collect → detect_and_cluster → score`. Користувач бачить попередній завершений
+рейтинг, доки новий `scoring_run` не перейде в `COMPLETED`; API повертає `scoring_run_id`, тому
+змішування результатів двох запусків неможливе. Репліка відстає від primary на час доставки WAL;
+читання власного щойно створеного запису (стан запуску) виконується на primary.
+
+Одиничні точки відмови (SPOF) одновузлового розгортання: Redis, PostgreSQL primary і сам вузол
+Docker. Пом'якшення: AOF у Redis і повторна постановка запусків `PENDING` старших за 10 хв; streaming
+replica і WAL-архів (RPO ≤ 15 хв, RTO ≤ 30 хв); health check і `restart: unless-stopped` для всіх
+контейнерів. Усунення SPOF вузла потребує кластера (Kubernetes, Redis Sentinel), що виходить за межі
+роботи; ризик прийнято в ADR-001.
+
+FinOps: усі компоненти мають безкоштовні ліцензії, витрати визначаються ресурсами вузла. Оцінка
+пам'яті: PostgreSQL primary і replica — по 1 GiB, Redis — 256 MiB, Core API — 512 MiB, Ingestion
+Worker — 256 MiB, Analytics Worker — 2 GiB, контур спостережуваності — 1,5 GiB; разом ≈ 6,5 GiB у межах
+вузла 8 GiB. Відмова від Kafka і Keycloak зберігає щонайменше 1,5 GiB.
+
+Залишкові ризики: зміна умов доступу до джерел (адаптер на джерело і ознака `is_enabled`); деградація
+HNSW-індексу понад 10⁶ векторів (перевірка в Розділі 3); точність класифікатора скарг нижче F1 0,80
+(резервний метод `LEXICON`).
+
 ## 2.2. Контекстне та контейнерне моделювання системи (C4 Model: Levels 1–2)
 
 ### 2.2.1. Діаграма контексту (C4 Level 1)
@@ -208,7 +274,38 @@ C4Component
 | Outbound | CeleryTaskPublisher | Публікація задачі `run_scoring` | Задача містить лише `scoring_run_id` | [ADR-001](adr/0001-choice-of-technology.md) |
 | Outbound | AuditEventWriter | Запис події аудиту в тій самій транзакції | Подія не записується для невдалої транзакції | [SRS-FUN-22](srs.md#srs-fun-22) |
 
+### 2.3.1. Опис взаємодії рівнів серверного ядра
+
+Запит проходить три рівні. Inbound Layer: `ObservabilityMiddleware` створює спан з W3C `traceparent`;
+`JWTAuthentication` перевіряє підпис RS256 за кешованим JWKS і claims `exp`, `iss`, `aud`;
+`UserRateThrottle` перевіряє ліміт у Redis; `RoleAndOwnershipPermission` порівнює роль з переліком
+ендпоінта і виконує `SELECT 1 FROM research_projects WHERE id = :projectId AND owner_id = :sub AND
+deleted_at IS NULL`; DTO-серіалізатор валідує тіло за схемою, що збігається з `openapi.yaml`. Core
+Layer: прикладний сервіс виконує сценарій у транзакції (Unit of Work), доменні сервіси обчислюють
+результат і не залежать від HTTP, ORM чи Redis. Outbound Layer: адаптери репозиторіїв виконують
+параметризовані запити ORM (primary для запису, replica для читання), `CeleryTaskPublisher` публікує
+задачу після `on_commit`, `AuditEventWriter` записує подію в ту саму транзакцію. Помилка на будь-якому
+рівні перетворюється `GlobalExceptionHandler` на схему `Error` з `trace_id`; доменні винятки мають
+фіксовані коди (`PROJECT_NOT_FOUND`, `IDEMPOTENCY_CONFLICT`, `VALIDATION_FAILED`).
+
 ## 2.4. Контур безпеки програмного рішення (Application Security)
+
+### 2.4.1. Засоби захисту серверного ядра
+
+| Загроза (OWASP Top 10 2021 / API Security Top 10 2023) | Механізм захисту | Компонент | Вимога |
+|---|---|---|---|
+| A07 / API2 Broken Authentication | JWT RS256 (2048 біт), access 15 хв, refresh 7 діб одноразовий з ротацією; повторне використання відкликаного refresh відкликає весь ланцюжок; ротація ключа підпису кожні 90 діб з `kid` у JWKS | JWTAuthentication, identity | [SRS-NFR-SEC-01](srs.md#srs-nfr-sec-01) |
+| A02 Cryptographic Failures | Паролі — Argon2id (64 MiB, 3 ітерації, паралелізм 4); refresh-токени — SHA-256; автори — HMAC-SHA-256 із секретом поза БД; TLS 1.2+ | identity, ingestion, Nginx | [SRS-NFR-SEC-02](srs.md#srs-nfr-sec-02), [SRS-NFR-SEC-05](srs.md#srs-nfr-sec-05) |
+| A01 / API1 BOLA (IDOR) | Кожен запит до `/projects/{projectId}/…` перевіряє `owner_id = sub`; невласник — 404; UUIDv7 у шляхах | RoleAndOwnershipPermission | [SRS-NFR-SEC-03](srs.md#srs-nfr-sec-03) |
+| API5 Broken Function Level Authorization | Перелік ролей на кожному ViewSet; `PATCH /data-sources`, `GET /audit-events` — лише ADMIN | RoleAndOwnershipPermission | [SRS-FUN-03](srs.md#srs-fun-03) |
+| API3 Mass Assignment | DTO з явним переліком полів, `additionalProperties: false`; `owner_id`, `status`, `version` лише для читання | Request DTO | [SRS-FUN-04](srs.md#srs-fun-04) |
+| A03 Injection (SQLi) | Лише ORM і параметризовані запити; правило SonarQube проти `raw()` з конкатенацією; шаблон ключових слів забороняє `< > { } "` | Repositories, DTO | [SRS-NFR-SEC-06](srs.md#srs-nfr-sec-06) |
+| API4 Unrestricted Resource Consumption | 100 запитів/хв на користувача, 5 спроб входу/хв на IP, тіло ≤ 1 MiB, `page_size` ≤ 100, блокування облікового запису на 15 хв після 10 невдалих входів | UserRateThrottle, Nginx | [SRS-NFR-SEC-04](srs.md#srs-nfr-sec-04) |
+| API7 SSRF | Адреси API фіксовані в `data_sources.base_url`; URL конкурента сервер не завантажує | Source adapters | [SRS-FUN-14](srs.md#srs-fun-14) |
+| A05 Security Misconfiguration | `DEBUG = False`; HSTS, `X-Content-Type-Options`, CSP; CORS лише для origin Web App; токени в cookie `HttpOnly; Secure; SameSite=Strict` | Nginx, Web App | [SRS-NFR-SEC-05](srs.md#srs-nfr-sec-05) |
+| A06 Vulnerable Components | Trivy (image, fs) і SonarQube у CI; блокування merge при HIGH/CRITICAL | GitHub Actions | [SRS-NFR-SEC-06](srs.md#srs-nfr-sec-06) |
+| A09 Logging and Monitoring Failures | Журнал аудиту append-only (UPDATE/DELETE заборонено правами ролі БД); JSON-логи без паролів і токенів; алерт Grafana на > 20 відповідей 401/хв | AuditEventWriter, Grafana | [SRS-FUN-22](srs.md#srs-fun-22) |
+| Витік секретів | Секрети лише у змінних середовища (`.env` у `.gitignore`); сканування секретів Trivy у CI | Docker Compose, CI | [SRS-NFR-INFRA-01](srs.md#srs-nfr-infra-01) |
 
 ## 2.5. Специфікація міжсервісних контрактів та топологія API-маршрутів
 
@@ -229,7 +326,184 @@ Core API (C4 Level 2) і є джерелом для генерації серв�
 | Пагінація | `page` (1–10 000), `page_size` (1–100, за замовчуванням 20); відповідь містить `total` | [SRS-FUN-05](srs.md#srs-fun-05), [SRS-FUN-20](srs.md#srs-fun-20) |
 | Узгодженість з БД | Поля JSON у snake_case збігаються з колонками моделі 2.7; ENUM-схеми ідентичні типам PostgreSQL | Підрозділ 2.8 |
 
+### 2.5.2. Карта інтерфейсних маршрутів системи
+
+| ID | Метод | Шлях (URI) | Вхідні параметри / Payload | Призначення | Контейнер-обробник |
+|---|---|---|---|---|---|
+| API-REQ-01 | POST | `/api/v1/auth/tokens` | body `TokenRequest {email: string(email, ≤ 254), password: string(12–128)}` | Видача токенів | Core API (identity) |
+| API-REQ-02 | POST | `/api/v1/auth/tokens/refresh` | body `RefreshRequest {refresh_token: string(32–512)}` | Ротація токенів | Core API (identity) |
+| API-REQ-03 | POST | `/api/v1/projects` | body `ProjectCreate {title, description?, keywords[1–20], source_codes[1–5]}` | Створення проєкту | Core API (projects) |
+| API-REQ-04 | GET | `/api/v1/projects` | query `page`, `page_size`, `status?` | Перелік проєктів | Core API (projects) |
+| API-REQ-05 | GET | `/api/v1/projects/{projectId}` | path `projectId: uuid` | Картка проєкту | Core API (projects) |
+| API-REQ-06 | POST | `/api/v1/projects/{projectId}/collection-runs` | header `Idempotency-Key` (16–64); body `CollectionRunCreate {source_codes?}` | Запуск збору (202) | Core API → Ingestion Worker |
+| API-REQ-07 | GET | `/api/v1/projects/{projectId}/collection-runs/{runId}` | path `projectId`, `runId: uuid` | Стан запуску | Core API (primary) |
+| API-REQ-08 | GET | `/api/v1/projects/{projectId}/complaints` | query `page`, `page_size`, `cluster_id?: uuid`, `min_pain_score?: 0–1` | Перелік скарг | Core API (replica) |
+| API-REQ-09 | POST | `/api/v1/projects/{projectId}/scoring-runs` | header `Idempotency-Key`; body `ScoringRunCreate {scoring_model_version?}` | Запуск оцінювання (202) | Core API → Analytics Worker |
+| API-REQ-10 | GET | `/api/v1/projects/{projectId}/niches` | query `page`, `page_size`, `scoring_run_id?`, `uncertainty_level?` | Рейтинг ніш | Core API (replica, Redis) |
+| API-REQ-11 | GET | `/api/v1/projects/{projectId}/niches/{nicheId}/explanation` | path `nicheId: uuid`; query `scoring_run_id?` | Пояснення рейтингу | Core API (replica, Redis) |
+| API-REQ-12 | POST | `/api/v1/projects/{projectId}/competitors` | body `CompetitorCreate {niche_id, name, website_url?, github_repo?}` | Реєстрація конкурента | Core API → Ingestion Worker |
+| API-REQ-13 | GET | `/api/v1/projects/{projectId}/niches/{nicheId}/competitors` | path `nicheId: uuid` | Порівняння конкурентів | Core API (replica) |
+| API-REQ-14 | POST | `/api/v1/projects/{projectId}/reports` | body `ReportCreate {format: JSON або CSV, scoring_run_id?}` | Формування звіту | Core API (reporting) |
+| API-REQ-15 | GET | `/api/v1/data-sources` | — | Перелік джерел | Core API |
+| API-REQ-16 | PATCH | `/api/v1/data-sources/{sourceCode}` | header `If-Match`; body `DataSourcePatch {is_enabled?, rate_limit_per_hour?, quota_share?}` | Зміна джерела (ADMIN) | Core API |
+| API-REQ-17 | GET | `/api/v1/audit-events` | query `page`, `page_size`, `actor_id?`, `action?`, `from?`, `to?` | Журнал аудиту (ADMIN) | Core API (replica) |
+
+Паролі й токени передаються лише в тілі запиту або в заголовку `Authorization`, ніколи в
+query-параметрах; Nginx не записує тіла запитів у журнал, а заголовок `Authorization` маскується.
+
+### 2.5.3. Наскрізні потоки даних
+
+**Data Flow 1. Запуск збору даних (API-REQ-06).**
+
+1. Браузер передає cookie `HttpOnly; Secure; SameSite=Strict` серверу Next.js (Web App), який формує
+   запит `POST /api/v1/projects/{projectId}/collection-runs` через HTTPS (TLS 1.3) з заголовками
+   `Authorization: Bearer <JWT>` і `Idempotency-Key`; JavaScript у браузері токен не отримує.
+2. Nginx перевіряє розмір тіла (`client_max_body_size 1m`, інакше 413), CORS (дозволено лише origin Web
+   App) і ліміт з'єднань на IP, після чого передає запит у Core API (HTTP/1.1).
+3. Core API перевіряє JWT, ліміт 100 запитів/хв, роль і належність проєкту (невласник — 404).
+4. `CollectionRunService` у транзакції шукає запуск за `(project_id, idempotency_key)`: збіг із тим
+   самим `request_hash` — 200 з наявним запуском; з іншим — 409; інакше `INSERT collection_runs`
+   (`PENDING`) і `collection_run_sources`, подія аудиту, COMMIT.
+5. Після COMMIT `CeleryTaskPublisher` виконує `LPUSH` задачі `collect(run_id)` у Redis; API повертає
+   202 з `Location`.
+6. Ingestion Worker виконує ALG-01 (HTTPS до джерел, ≤ 80 % квоти), записує документи в PostgreSQL і
+   ставить задачу `detect_and_cluster` у чергу `analytics`.
+
+**Data Flow 2. Читання рейтингу ніш (API-REQ-10).**
+
+1. `GET /api/v1/projects/{projectId}/niches?page=1&page_size=20` (HTTPS, Bearer JWT).
+2. Після перевірок Inbound `RankingQueryService` визначає останній `scoring_run` зі статусом
+   `COMPLETED` і формує ключ кешу `niches:{scoring_run_id}:{page}:{page_size}:{filter}`.
+3. Влучання в Redis — відповідь без звернення до БД; промах — запит до репліки
+   `SELECT … FROM niche_scores JOIN niches … ORDER BY rank LIMIT 20 OFFSET 0` за індексом
+   `ix_niche_scores_run_rank`, запис у кеш із TTL 300 с.
+4. Відповідь 200 `NichePage` з `total`, `scoring_run_id`, `scoring_model_version`; `page_size` > 100 — 400.
+
+**Data Flow 3. Пояснення рейтингу (API-REQ-11).** Ідентифікатор ніші перевіряється на належність
+проєкту запиту (`niches.project_id = projectId`), що закриває IDOR через підміну `nicheId`; докази
+повертаються з URL першоджерела і атрибуцією CC BY-SA для Stack Exchange.
+
 ## 2.6. Моделювання користувацького досвіду та транзакційних сценаріїв (Use Cases)
+
+### 2.6.1. Діаграма прецедентів
+
+Діаграму побудовано в CASE-інструменті StarUML: модель `docs/uml/use-case-diagram.mdj` сформовано
+скриптом `tools/gen_usecase_mdj.py` і експортовано в PNG засобами StarUML CLI.
+
+![Рисунок 2.6 — Діаграма прецедентів DemandLens (StarUML)](uml/use-case-diagram.png)
+
+| Елемент | Склад |
+|---|---|
+| Межа системи | DemandLens |
+| Первинні актори | Аналітик; Адміністратор (узагальнення: успадковує прецеденти Аналітика) |
+| Вторинні актори | HN Search API, Stack Exchange API, GitHub REST API, Wikimedia Analytics API |
+| Прецеденти | UC-01…UC-12 |
+| «include» | UC-02…UC-09 → UC-10 «Перевірити токен доступу»; UC-03 → UC-12 «Отримати публікації з джерела» |
+| «extend» | UC-11 «Повторити збір після збою джерела» → UC-03 (умова: Circuit Breaker джерела в стані Open або вичерпано повтори) |
+
+### 2.6.2. UC-03. Запустити збір даних
+
+| Поле | Значення |
+|---|---|
+| Первинний актор | Аналітик |
+| Вторинні актори | HN Search API, Stack Exchange API, GitHub REST API, Wikimedia Analytics API |
+| Короткий опис | Отримання нових публікацій за ключовими словами проєкту для виявлення скарг |
+| Продуктові передумови | Користувач автентифікований, роль `ANALYST`, власник проєкту; проєкт має статус `ACTIVE`, 1–20 ключових слів і ≥ 1 джерело з `is_enabled = true`; відкрито сторінку проєкту |
+| Інфраструктурні передумови | `/healthz` Core API повертає 200; Redis відповідає на `PING`; PostgreSQL primary доступний для запису; для проєкту немає запуску в статусі `RUNNING` (інакше AF-03B); Circuit Breaker хоча б одного обраного джерела не в стані Open |
+
+Main Success Scenario:
+
+| Крок | Дія актора | Реакція та відповідь системи |
+|---|---|---|
+| 1 | Аналітик ініціює збір даних для проєкту | Web App генерує `Idempotency-Key` (UUIDv4) і надсилає `POST /projects/{projectId}/collection-runs` з Bearer JWT |
+| 2 | — | Nginx перевіряє TLS, CORS, розмір тіла; Core API перевіряє JWT (UC-10), ліміт запитів, роль і власника (`SELECT … FROM research_projects WHERE id = :projectId AND owner_id = :sub`) |
+| 3 | — | У транзакції: `SELECT … FROM collection_runs WHERE project_id = :p AND idempotency_key = :k` (запису немає); `INSERT collection_runs (status = PENDING, request_hash)`; `INSERT collection_run_sources` для кожного джерела; `INSERT audit_events (action = 'collection_run.create')`; COMMIT |
+| 4 | — | Після COMMIT — `LPUSH` задачі `collect(run_id)` у чергу `ingestion`; відповідь 202 з `CollectionRun (status = PENDING)` і `Location` |
+| 5 | Аналітик спостерігає за прогресом | Web App кожні 5 с викликає `GET …/collection-runs/{runId}` (читання з primary) і відображає `documents_fetched` по джерелах |
+| 6 | — | Ingestion Worker виконує ALG-01 (UC-12): посторінкові HTTPS-запити з токен-бакетом, `INSERT documents … ON CONFLICT DO NOTHING`, збереження курсора після кожної сторінки |
+| 7 | — | Усі джерела завершено: `UPDATE collection_runs SET status = 'COMPLETED', finished_at = now()`; публікація задачі `detect_and_cluster(project_id)` у чергу `analytics` |
+| 8 | Аналітик отримує підсумок | `GET` повертає `COMPLETED` і кількість документів; інтерфейс пропонує перейти до ранжування (UC-04) |
+
+Постумови: існує запис `collection_runs` зі статусом `COMPLETED` і курсорами джерел; нові документи
+збережено з `author_hash`, дублікати не створено; подію аудиту записано; задачу аналізу поставлено в
+чергу; кількість запитів до кожного джерела відображено в метриці `source_requests_total`.
+
+Alternative Flows:
+
+| ID | Старт із кроку | Умова-тригер | Повернення на крок | Покроковий алгоритм обробки |
+|---|---|---|---|---|
+| AF-03A | 3 | Запит із тим самим `Idempotency-Key` уже обробляли (повторне натискання, повтор мережевого клієнта) | 5 | Збіг `request_hash`: транзакція не створює записів, відповідь 200 з наявним запуском; аналітик бачить той самий прогрес |
+| AF-03B | 3 | Для проєкту вже існує запуск у статусі `RUNNING` | 5 | Новий запуск не створюється; відповідь 409 `RUN_IN_PROGRESS` з `run_id` активного запуску; Web App переходить до відстеження активного запуску |
+| AF-03C | 3 | Аналітик обрав джерело, яке адміністратор вимкнув після створення проєкту | 3 | Серверна валідація повертає 422 `SOURCE_DISABLED` з переліком вимкнених джерел; аналітик знімає джерело з вибору і повторює запит |
+
+Exception Flows:
+
+| ID | Назва збою | Умова тригеру | Крок | Дії для UI / користувача | Технічні дії сервера та БД |
+|---|---|---|---|---|---|
+| EF-03A | Відмова зовнішнього джерела | Джерело повертає 5xx/429 або тайм-аут 10 с понад 5 разів; Circuit Breaker переходить у Open | 6 | Інтерфейс показує статус джерела «недоступне» і пропонує повторити пізніше (UC-11) | `collection_run_sources.status := FAILED`, `last_error_code := SOURCE_UNAVAILABLE`; інші джерела продовжують збір; запуск завершується `PARTIALLY_COMPLETED`; курсор збережено для повтору |
+| EF-03B | Недоступність Redis при постановці задачі | `LPUSH` завершується помилкою з'єднання після COMMIT | 4 | Користувач отримує 202; якщо запуск перебуває в `PENDING` довше 10 хв, відображається «Запуск поставлено в чергу повторно» | Задача Celery Beat кожні 5 хв знаходить запуски `PENDING` старші за 10 хв і повторно публікує їх; дублікати виключено ідемпотентністю ALG-01 |
+| EF-03C | Збій PostgreSQL під час збереження сторінки | Помилка транзакції при `INSERT documents` | 6 | Прогрес не зменшується; після відновлення збір продовжується автоматично | ROLLBACK сторінки; курсор не змінюється; повтор із backoff; після 5 невдач — `FAILED` з `error_code = DB_ERROR` і алерт Grafana |
+
+### 2.6.3. UC-04. Запустити ранжування ніш
+
+| Поле | Значення |
+|---|---|
+| Первинний актор | Аналітик |
+| Вторинні актори | — |
+| Короткий опис | Обчислення рейтингу ніш проєкту за активною моделлю оцінювання з довірчим інтервалом |
+| Продуктові передумови | Користувач автентифікований, роль `ANALYST`, власник проєкту; існує `clustering_run` зі статусом `COMPLETED` і ≥ 1 нішею `CANDIDATE` |
+| Інфраструктурні передумови | Існує активна модель оцінювання (`scoring_models.is_active = true`) із сумою ваг 1 ± 0,001; черга `analytics` має ≥ 1 активний обробник |
+
+| Крок | Дія актора | Реакція та відповідь системи |
+|---|---|---|
+| 1 | Аналітик запускає ранжування | `POST /projects/{projectId}/scoring-runs` з `Idempotency-Key`; перевірки JWT, ролі, власника |
+| 2 | — | Транзакція: вибір активної моделі і останнього завершеного `clustering_run`; `INSERT scoring_runs (PENDING)`; подія аудиту; COMMIT; `LPUSH score(scoring_run_id)`; відповідь 202 |
+| 3 | — | Analytics Worker виконує ALG-03: нормалізація 5 критеріїв, зважена сума, 500 bootstrap-перевибірок, ранжування |
+| 4 | — | Одна транзакція: `INSERT niche_scores, score_components, score_evidence, niche_arguments`; `UPDATE niches SET status = 'SCORED'`; `scoring_runs.status := COMPLETED` |
+| 5 | Аналітик відкриває рейтинг | `GET /niches` повертає сторінку ніш за `rank` із `score`, `confidence_interval`, `uncertainty_level` |
+
+Постумови: запуск оцінювання має статус `COMPLETED` і посилання на версію моделі та запуск
+кластеризації; рейтинг кожної ніші має 5 компонентів і інтервал; кеш попереднього запуску не
+використовується (новий `scoring_run_id`).
+
+| ID | Старт із кроку | Умова-тригер | Повернення на крок | Покроковий алгоритм обробки |
+|---|---|---|---|---|
+| AF-04A | 1 | Аналітик обирає неактивну версію моделі `scoring_model_version` | 2 | Сервер перевіряє існування версії (інакше 422 `MODEL_NOT_FOUND`) і фіксує обрану версію в `scoring_runs` |
+| AF-04B | 2 | Немає завершеного `clustering_run` (аналіз триває) | 1 | Відповідь 409 `CLUSTERING_NOT_READY`; інтерфейс пропонує повторити після завершення аналізу |
+
+| ID | Назва збою | Умова тригеру | Крок | Дії для UI / користувача | Технічні дії сервера та БД |
+|---|---|---|---|---|---|
+| EF-04A | Перевищення часу обчислення | ALG-03 виконується довше 600 с | 3 | Повідомлення «Ранжування не завершено, попередній рейтинг збережено» | ROLLBACK транзакції запису оцінок; `scoring_runs.status := FAILED`, `error_code := TIMEOUT`; рейтинг попереднього запуску залишається доступним |
+
+### 2.6.4. UC-05. Переглянути пояснення рейтингу ніші
+
+| Поле | Значення |
+|---|---|
+| Первинний актор | Аналітик |
+| Вторинні актори | — |
+| Короткий опис | Отримання обґрунтування рейтингу: внески критеріїв, документи-докази, аргументи «за», ризики, інтервал |
+| Продуктові передумови | Користувач автентифікований; ніша належить проєкту користувача; існує `scoring_run` зі статусом `COMPLETED` з оцінкою цієї ніші; відкрито сторінку рейтингу |
+| Інфраструктурні передумови | PostgreSQL replica доступна з відставанням < 5 с (`pg_replication_lag_seconds`); Redis доступний (за недоступності — читання без кешу) |
+
+| Крок | Дія актора | Реакція та відповідь системи |
+|---|---|---|
+| 1 | Аналітик обирає нішу в рейтингу | `GET /projects/{projectId}/niches/{nicheId}/explanation` з Bearer JWT |
+| 2 | — | Перевірки JWT, ролі, власника; перевірка `niches.project_id = projectId` (захист від IDOR) |
+| 3 | — | Пошук у Redis за ключем `expl:{scoring_run_id}:{nicheId}`; промах — запити до репліки: `niche_scores`, `v_score_contributions`, `score_evidence JOIN complaints JOIN documents`, `niche_arguments`; запис у кеш (TTL 300 с) |
+| 4 | — | Перевірка інваріанта: сума внесків = `score` ± 0,01; відповідь 200 `NicheExplanation` |
+| 5 | Аналітик переходить до документа-доказу | Відкривається URL першоджерела; для Stack Exchange відображено атрибуцію CC BY-SA |
+
+Постумови: стан даних не змінюється (операція читання); лічильник
+`http_server_requests_total{route="API-REQ-11"}` збільшено.
+
+| ID | Старт із кроку | Умова-тригер | Повернення на крок | Покроковий алгоритм обробки |
+|---|---|---|---|---|
+| AF-05A | 1 | Аналітик обирає попередній запуск оцінювання для порівняння (`scoring_run_id`) | 3 | Сервер перевіряє, що запуск належить проєкту і має статус `COMPLETED` (інакше 404), і повертає пояснення цього запуску |
+| AF-05B | 4 | Ніша має рівень невизначеності `HIGH` | 5 | Відповідь містить ризик «Висока невизначеність оцінки»; інтерфейс позначає оцінку як попередню |
+
+| ID | Назва збою | Умова тригеру | Крок | Дії для UI / користувача | Технічні дії сервера та БД |
+|---|---|---|---|---|---|
+| EF-05A | Недоступність репліки | Помилка з'єднання з репліки або відставання > 30 с | 3 | Користувач отримує пояснення без помилки | Database router перемикає читання на primary; подія `replica_fallback` у лог і метрику; за недоступності обох вузлів — 503 з `Retry-After: 30` |
 
 ## 2.7. Проєктування та документування моделей даних
 
@@ -963,3 +1237,19 @@ graph TD
 ([SRS-NFR-PERF-04](srs.md#srs-nfr-perf-04), критерій F1 ≥ 0,80).
 
 ## Висновки до розділу 2
+
+Розділ 2 зафіксував архітектуру DemandLens як модульний моноліт з асинхронним конвеєром Celery і Redis
+(ADR-001): 14 контейнерів C4 Level 2 з протоколом на кожному зв'язку, компонентна модель Core API з
+ізоляцією доменного ядра через порти і контур Application Security, що закриває вектори OWASP Top 10 і
+API Security Top 10 конкретними механізмами (JWT RS256, Argon2id, перевірка належності об'єктів, DTO
+без невідомих полів, rate limiting, журнал аудиту).
+
+Поведінку системи описано 12 прецедентами в StarUML і трьома специфікаціями з передумовами, основним
+сценарієм на рівні SQL-запитів і подій черги, 7 альтернативними і 5 винятковими потоками. Модель даних
+із 27 таблиць у 3NF, контракт OpenAPI із 17 операцій і алгоритми ALG-01…03 пройшли інструментальний і
+експертний інтеграційний аудит: 10 розбіжностей усунено, блокерів немає.
+
+Отримані специфікації визначають однозначний план реалізації: Розділ 3 охоплюватиме програмну
+реалізацію модулів за компонентною моделлю, розгортання в Docker Compose, конвеєр CI/CD з Trivy і
+SonarQube та перевірку нефункціональних вимог інструментами k6, pytest і Prometheus за критеріями
+верифікації SRS.
